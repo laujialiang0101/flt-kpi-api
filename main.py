@@ -71,90 +71,97 @@ async def get_my_dashboard(
     if not end_date:
         end_date = date.today()
 
-    async with pool.acquire() as conn:
-        # Get aggregated KPIs from materialized view
-        summary = await conn.fetchrow("""
-            SELECT
-                staff_id,
-                outlet_id,
-                SUM(transactions) as transactions,
-                SUM(total_sales) as total_sales,
-                SUM(gross_profit) as gross_profit,
-                SUM(house_brand_sales) as house_brand_sales,
-                SUM(focused_1_sales) as focused_1_sales,
-                SUM(focused_2_3_sales) as focused_2_3_sales,
-                SUM(pwp_clearance_total) as pwp_clearance_total
-            FROM analytics.mv_staff_daily_kpi
-            WHERE staff_id = $1
-              AND sale_date BETWEEN $2 AND $3
-            GROUP BY staff_id, outlet_id
-        """, staff_id, start_date, end_date)
+    try:
+        async with pool.acquire() as conn:
+            # Get aggregated KPIs from materialized view
+            summary = await conn.fetchrow("""
+                SELECT
+                    staff_id,
+                    outlet_id,
+                    SUM(transactions) as transactions,
+                    SUM(total_sales) as total_sales,
+                    SUM(gross_profit) as gross_profit,
+                    SUM(house_brand_sales) as house_brand_sales,
+                    SUM(focused_1_sales) as focused_1_sales,
+                    SUM(COALESCE(focused_2_sales, 0)) as focused_2_sales,
+                    SUM(COALESCE(focused_3_sales, 0)) as focused_3_sales,
+                    SUM(COALESCE(pwp_sales, 0)) as pwp_sales,
+                    SUM(COALESCE(clearance_sales, 0)) as clearance_sales
+                FROM analytics.mv_staff_daily_kpi
+                WHERE staff_id = $1
+                  AND sale_date BETWEEN $2 AND $3
+                GROUP BY staff_id, outlet_id
+            """, staff_id, start_date, end_date)
 
-        if not summary:
-            raise HTTPException(status_code=404, detail="No data found")
+            if not summary:
+                raise HTTPException(status_code=404, detail="No data found")
 
-        # Get staff name
-        staff_info = await conn.fetchrow("""
-            SELECT "AcSalesmanName" FROM "AcSalesman" WHERE "AcSalesmanID" = $1
-        """, staff_id)
+            # Get staff name
+            staff_info = await conn.fetchrow("""
+                SELECT "AcSalesmanName" FROM "AcSalesman" WHERE "AcSalesmanID" = $1
+            """, staff_id)
 
-        # Get outlet name
-        outlet_info = await conn.fetchrow("""
-            SELECT "LocationName" FROM "AcLocation" WHERE "AcLocationID" = $1
-        """, summary['outlet_id'])
+            # Get outlet name
+            outlet_info = await conn.fetchrow("""
+                SELECT "LocationName" FROM "AcLocation" WHERE "AcLocationID" = $1
+            """, summary['outlet_id'])
 
-        # Get rankings
-        rankings = await conn.fetchrow("""
-            SELECT outlet_rank_sales, company_rank_sales, sales_percentile
-            FROM analytics.mv_staff_rankings
-            WHERE staff_id = $1
-              AND month = DATE_TRUNC('month', $2::date)
-        """, staff_id, start_date)
+            # Get rankings
+            rankings = await conn.fetchrow("""
+                SELECT outlet_rank_sales, company_rank_sales, sales_percentile
+                FROM analytics.mv_staff_rankings
+                WHERE staff_id = $1
+                  AND month = DATE_TRUNC('month', $2::date)
+            """, staff_id, start_date)
 
-        # Get daily breakdown
-        daily = await conn.fetch("""
-            SELECT sale_date, transactions, total_sales, house_brand_sales
-            FROM analytics.mv_staff_daily_kpi
-            WHERE staff_id = $1
-              AND sale_date BETWEEN $2 AND $3
-            ORDER BY sale_date
-        """, staff_id, start_date, end_date)
+            # Get daily breakdown
+            daily = await conn.fetch("""
+                SELECT sale_date, transactions, total_sales, house_brand_sales
+                FROM analytics.mv_staff_daily_kpi
+                WHERE staff_id = $1
+                  AND sale_date BETWEEN $2 AND $3
+                ORDER BY sale_date
+            """, staff_id, start_date, end_date)
 
-        return {
-            "success": True,
-            "data": {
-                "staff_id": staff_id,
-                "staff_name": staff_info['AcSalesmanName'] if staff_info else "Unknown",
-                "outlet_id": summary['outlet_id'],
-                "outlet_name": outlet_info['LocationName'] if outlet_info else "Unknown",
-                "period": {
-                    "start": start_date.isoformat(),
-                    "end": end_date.isoformat()
-                },
-                "kpis": {
-                    "total_sales": float(summary['total_sales'] or 0),
-                    "house_brand": float(summary['house_brand_sales'] or 0),
-                    "focused_1": float(summary['focused_1_sales'] or 0),
-                    "focused_2_3": float(summary['focused_2_3_sales'] or 0),
-                    "pwp_clearance": float(summary['pwp_clearance_total'] or 0),
-                    "transactions": int(summary['transactions'] or 0),
-                    "gross_profit": float(summary['gross_profit'] or 0)
-                },
-                "rankings": {
-                    "outlet_rank": rankings['outlet_rank_sales'] if rankings else None,
-                    "company_rank": rankings['company_rank_sales'] if rankings else None,
-                    "percentile": float(rankings['sales_percentile']) if rankings and rankings['sales_percentile'] else None
-                },
-                "daily": [
-                    {
-                        "date": row['sale_date'].isoformat(),
-                        "sales": float(row['total_sales'] or 0),
-                        "house_brand": float(row['house_brand_sales'] or 0)
-                    }
-                    for row in daily
-                ]
+            return {
+                "success": True,
+                "data": {
+                    "staff_id": staff_id,
+                    "staff_name": staff_info['AcSalesmanName'] if staff_info else "Unknown",
+                    "outlet_id": summary['outlet_id'],
+                    "outlet_name": outlet_info['LocationName'] if outlet_info else "Unknown",
+                    "period": {
+                        "start": start_date.isoformat(),
+                        "end": end_date.isoformat()
+                    },
+                    "kpis": {
+                        "total_sales": float(summary['total_sales'] or 0),
+                        "house_brand": float(summary['house_brand_sales'] or 0),
+                        "focused_1": float(summary['focused_1_sales'] or 0),
+                        "focused_2": float(summary['focused_2_sales'] or 0),
+                        "focused_3": float(summary['focused_3_sales'] or 0),
+                        "pwp": float(summary['pwp_sales'] or 0),
+                        "clearance": float(summary['clearance_sales'] or 0),
+                        "transactions": int(summary['transactions'] or 0),
+                        "gross_profit": float(summary['gross_profit'] or 0)
+                    },
+                    "rankings": {
+                        "outlet_rank": rankings['outlet_rank_sales'] if rankings else None,
+                        "company_rank": rankings['company_rank_sales'] if rankings else None,
+                        "percentile": float(rankings['sales_percentile']) if rankings and rankings['sales_percentile'] else None
+                    },
+                    "daily": [
+                        {
+                            "date": row['sale_date'].isoformat(),
+                            "sales": float(row['total_sales'] or 0),
+                            "house_brand": float(row['house_brand_sales'] or 0)
+                        }
+                        for row in daily
+                    ]
+                }
             }
-        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
 @app.get("/api/v1/kpi/leaderboard")
