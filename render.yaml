@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: flt-kpi-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DB_HOST
+        value: dpg-d4pr99je5dus73eb5730-a.singapore-postgres.render.com
+      - key: DB_PORT
+        value: 5432
+      - key: DB_NAME
+        value: flt_sales_commission_db
+      - key: DB_USER
+        value: flt_sales_commission_db_user
+      - key: DB_PASSWORD
+        sync: false  # Set manually in Render dashboard
