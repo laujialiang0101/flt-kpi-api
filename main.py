@@ -223,13 +223,12 @@ async def login(request: LoginRequest):
             if user['password'] != request.password:
                 return {"success": False, "error": "Invalid credentials"}
 
-            # Get staff's most recent outlet from sales data
+            # Get staff's assigned outlet from AcSalesman.AcSalesmanGroupID
             staff_info = await conn.fetchrow("""
-                SELECT outlet_id
-                FROM analytics.mv_staff_daily_kpi
-                WHERE staff_id = $1
-                ORDER BY sale_date DESC
-                LIMIT 1
+                SELECT "AcSalesmanGroupID" as outlet_id
+                FROM "AcSalesman"
+                WHERE "AcSalesmanID" = $1
+                  AND "Active" = 'Y'
             """, user['code'])
 
             # Determine role and permissions
@@ -711,28 +710,31 @@ async def get_team_overview(
         end_date = date.today()
 
     async with pool.acquire() as conn:
-        # Outlet summary - all 8 KPIs
+        # Team summary - aggregate sales from all staff in this group
         outlet_summary = await conn.fetchrow("""
             SELECT
-                SUM(transactions) as transactions,
-                SUM(total_sales) as total_sales,
-                SUM(gross_profit) as gross_profit,
-                SUM(house_brand_sales) as house_brand_sales,
-                SUM(focused_1_sales) as focused_1_sales,
-                SUM(focused_2_sales) as focused_2_sales,
-                SUM(focused_3_sales) as focused_3_sales,
-                SUM(pwp_sales) as pwp_sales,
-                SUM(clearance_sales) as clearance_sales
-            FROM analytics.mv_outlet_daily_kpi
-            WHERE outlet_id = $1
-              AND sale_date BETWEEN $2 AND $3
+                COALESCE(SUM(k.transactions), 0) as transactions,
+                COALESCE(SUM(k.total_sales), 0) as total_sales,
+                COALESCE(SUM(k.gross_profit), 0) as gross_profit,
+                COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
+                COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
+                COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
+                COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
+                COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
+                COALESCE(SUM(k.clearance_sales), 0) as clearance_sales
+            FROM "AcSalesman" s
+            LEFT JOIN analytics.mv_staff_daily_kpi k
+                ON s."AcSalesmanID" = k.staff_id
+                AND k.sale_date BETWEEN $2 AND $3
+            WHERE s."AcSalesmanGroupID" = $1
+              AND s."Active" = 'Y'
         """, outlet_id, start_date, end_date)
 
-        # Get outlet name
+        # Get outlet/group name - try AcLocation first, fall back to group ID
         outlet_info = await conn.fetchrow("""
-            SELECT "AcLocationDesc" as outlet_name
-            FROM "AcLocation"
-            WHERE "AcLocationID" = $1
+            SELECT COALESCE(l."AcLocationDesc", $1) as outlet_name
+            FROM (SELECT 1) dummy
+            LEFT JOIN "AcLocation" l ON l."AcLocationID" = $1
         """, outlet_id)
 
         # Staff performance - all 8 KPIs
