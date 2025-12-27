@@ -1345,6 +1345,77 @@ async def unsubscribe_from_push(data: UnsubscribeRequest):
         raise HTTPException(status_code=500, detail=f"Unsubscribe failed: {str(e)}")
 
 
+# ============================================================================
+# Debug Endpoints
+# ============================================================================
+
+@app.get("/api/v1/debug/sales-breakdown")
+async def debug_sales_breakdown(
+    outlet_id: str = Query(..., description="Outlet ID"),
+    start_date: date = Query(..., description="Start date"),
+    end_date: date = Query(..., description="End date")
+):
+    """Debug endpoint to compare cash vs invoice sales from raw tables."""
+    try:
+        async with pool.acquire() as conn:
+            # Cash Sales from AcCSD + AcCSM
+            cash_sales = await conn.fetchrow("""
+                SELECT
+                    COUNT(DISTINCT m."DocumentNo") as transactions,
+                    SUM(d."ItemTotal") as total
+                FROM "AcCSD" d
+                INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                WHERE m."AcLocationID" = $1
+                  AND m."DocumentDate"::date BETWEEN $2 AND $3
+            """, outlet_id, start_date, end_date)
+
+            # Invoice Sales from AcCusInvoiceD + AcCusInvoiceM
+            invoice_sales = await conn.fetchrow("""
+                SELECT
+                    COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
+                    SUM(d."ItemTotalPrice") as total
+                FROM "AcCusInvoiceD" d
+                INNER JOIN "AcCusInvoiceM" m ON d."AcCusInvoiceMID" = m."AcCusInvoiceMID"
+                WHERE m."AcLocationID" = $1
+                  AND m."DocumentDate"::date BETWEEN $2 AND $3
+            """, outlet_id, start_date, end_date)
+
+            # Materialized view total (for comparison)
+            mv_total = await conn.fetchrow("""
+                SELECT
+                    SUM(transactions) as transactions,
+                    SUM(total_sales) as total
+                FROM analytics.mv_outlet_daily_kpi
+                WHERE outlet_id = $1
+                  AND sale_date BETWEEN $2 AND $3
+            """, outlet_id, start_date, end_date)
+
+            cash_total = float(cash_sales['total'] or 0)
+            invoice_total = float(invoice_sales['total'] or 0)
+            combined = cash_total + invoice_total
+
+            return {
+                "success": True,
+                "outlet_id": outlet_id,
+                "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
+                "breakdown": {
+                    "cash_sales": {
+                        "transactions": int(cash_sales['transactions'] or 0),
+                        "total": round(cash_total, 2)
+                    },
+                    "invoice_sales": {
+                        "transactions": int(invoice_sales['transactions'] or 0),
+                        "total": round(invoice_total, 2)
+                    },
+                    "combined_total": round(combined, 2),
+                    "materialized_view_total": round(float(mv_total['total'] or 0), 2)
+                }
+            }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
