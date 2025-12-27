@@ -1374,7 +1374,7 @@ async def debug_sales_breakdown(
                 SELECT column_name
                 FROM information_schema.columns
                 WHERE table_name = 'AcCSM'
-                AND column_name ILIKE '%void%' OR column_name ILIKE '%cancel%' OR column_name ILIKE '%status%'
+                AND (column_name ILIKE '%void%' OR column_name ILIKE '%cancel%' OR column_name ILIKE '%status%')
             """)
 
             # Check for negative ItemTotal (returns/refunds)
@@ -1389,18 +1389,21 @@ async def debug_sales_breakdown(
                   AND d."ItemTotal" < 0
             """, outlet_id, start_date, end_date)
 
-            # Check by document type prefix
+            # Check by document type prefix (limit to top 5 for speed)
             doc_type_check = await conn.fetch("""
-                SELECT
-                    LEFT(m."DocumentNo", 2) as doc_prefix,
-                    COUNT(DISTINCT m."DocumentNo") as doc_count,
-                    SUM(d."ItemTotal") as total
-                FROM "AcCSD" d
-                INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
-                WHERE m."AcLocationID" = $1
-                  AND m."DocumentDate"::date BETWEEN $2 AND $3
-                GROUP BY LEFT(m."DocumentNo", 2)
+                SELECT doc_prefix, doc_count, total FROM (
+                    SELECT
+                        LEFT(m."DocumentNo", 2) as doc_prefix,
+                        COUNT(DISTINCT m."DocumentNo") as doc_count,
+                        SUM(d."ItemTotal") as total
+                    FROM "AcCSD" d
+                    INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                    WHERE m."AcLocationID" = $1
+                      AND m."DocumentDate"::date BETWEEN $2 AND $3
+                    GROUP BY LEFT(m."DocumentNo", 2)
+                ) sub
                 ORDER BY total DESC
+                LIMIT 5
             """, outlet_id, start_date, end_date)
 
             # Invoice Sales from AcCusInvoiceD + AcCusInvoiceM
