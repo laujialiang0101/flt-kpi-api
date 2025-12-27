@@ -341,7 +341,7 @@ async def get_my_dashboard(
 
             # Get outlet name
             outlet_info = await conn.fetchrow("""
-                SELECT "LocationName" FROM "AcLocation" WHERE "AcLocationID" = $1
+                SELECT "AcLocationDesc" as outlet_name FROM "AcLocation" WHERE "AcLocationID" = $1
             """, summary['outlet_id'])
 
             # Get rankings
@@ -367,7 +367,7 @@ async def get_my_dashboard(
                     "staff_id": staff_id,
                     "staff_name": staff_info['AcSalesmanName'] if staff_info else "Unknown",
                     "outlet_id": summary['outlet_id'],
-                    "outlet_name": outlet_info['LocationName'] if outlet_info else "Unknown",
+                    "outlet_name": outlet_info['outlet_name'] if outlet_info else "Unknown",
                     "period": {
                         "start": start_date.isoformat(),
                         "end": end_date.isoformat()
