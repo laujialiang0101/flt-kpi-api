@@ -223,11 +223,13 @@ async def login(request: LoginRequest):
             if user['password'] != request.password:
                 return {"success": False, "error": "Invalid credentials"}
 
-            # Get staff info for outlet_id
+            # Get staff's most recent outlet from sales data
             staff_info = await conn.fetchrow("""
-                SELECT "AcLocationID" as outlet_id
-                FROM "AcSalesman"
-                WHERE "AcSalesmanID" = $1
+                SELECT outlet_id
+                FROM analytics.mv_staff_daily_kpi
+                WHERE staff_id = $1
+                ORDER BY sale_date DESC
+                LIMIT 1
             """, user['code'])
 
             # Determine role and permissions
@@ -320,8 +322,7 @@ async def get_my_dashboard(
                     SUM(gross_profit) as gross_profit,
                     SUM(house_brand_sales) as house_brand_sales,
                     SUM(focused_1_sales) as focused_1_sales,
-                    SUM(COALESCE(focused_2_sales, 0)) as focused_2_sales,
-                    SUM(COALESCE(focused_3_sales, 0)) as focused_3_sales,
+                    SUM(COALESCE(focused_2_3_sales, 0)) as focused_2_3_sales,
                     SUM(COALESCE(pwp_sales, 0)) as pwp_sales,
                     SUM(COALESCE(clearance_sales, 0)) as clearance_sales
                 FROM analytics.mv_staff_daily_kpi
@@ -375,8 +376,7 @@ async def get_my_dashboard(
                         "total_sales": float(summary['total_sales'] or 0),
                         "house_brand": float(summary['house_brand_sales'] or 0),
                         "focused_1": float(summary['focused_1_sales'] or 0),
-                        "focused_2": float(summary['focused_2_sales'] or 0),
-                        "focused_3": float(summary['focused_3_sales'] or 0),
+                        "focused_2_3": float(summary['focused_2_3_sales'] or 0),
                         "pwp": float(summary['pwp_sales'] or 0),
                         "clearance": float(summary['clearance_sales'] or 0),
                         "transactions": int(summary['transactions'] or 0),
@@ -600,8 +600,7 @@ async def get_my_targets(
                     SUM(total_sales) as total_sales,
                     SUM(house_brand_sales) as house_brand,
                     SUM(focused_1_sales) as focused_1,
-                    SUM(COALESCE(focused_2_sales, 0)) as focused_2,
-                    SUM(COALESCE(focused_3_sales, 0)) as focused_3,
+                    SUM(COALESCE(focused_2_3_sales, 0)) as focused_2_3,
                     SUM(COALESCE(clearance_sales, 0)) as clearance,
                     SUM(COALESCE(pwp_sales, 0)) as pwp,
                     SUM(transactions) as transactions
@@ -614,6 +613,12 @@ async def get_my_targets(
                 if not target_val or target_val == 0:
                     return None
                 return round((float(current_val or 0) / float(target_val)) * 100, 1)
+
+            # Calculate combined focused target (2+3) for comparison
+            focused_2_3_target = (
+                float(targets['focused_item_2_target'] or 0) +
+                float(targets['focused_item_3_target'] or 0)
+            ) if targets else 0
 
             result = {
                 "total_sales": {
@@ -634,17 +639,10 @@ async def get_my_targets(
                     "progress": calc_progress(current['focused_1'] if current else 0,
                                             targets['focused_item_1_target'] if targets else 0)
                 },
-                "focused_2": {
-                    "target": float(targets['focused_item_2_target'] or 0) if targets else 0,
-                    "current": float(current['focused_2'] or 0) if current else 0,
-                    "progress": calc_progress(current['focused_2'] if current else 0,
-                                            targets['focused_item_2_target'] if targets else 0)
-                },
-                "focused_3": {
-                    "target": float(targets['focused_item_3_target'] or 0) if targets else 0,
-                    "current": float(current['focused_3'] or 0) if current else 0,
-                    "progress": calc_progress(current['focused_3'] if current else 0,
-                                            targets['focused_item_3_target'] if targets else 0)
+                "focused_2_3": {
+                    "target": focused_2_3_target,
+                    "current": float(current['focused_2_3'] or 0) if current else 0,
+                    "progress": calc_progress(current['focused_2_3'] if current else 0, focused_2_3_target)
                 },
                 "clearance": {
                     "target": float(targets['stock_clearance_target'] or 0) if targets else 0,
@@ -981,18 +979,28 @@ async def get_staff_list(
     try:
         async with pool.acquire() as conn:
             if outlet_id:
+                # Get staff who have sales at this outlet (from materialized view)
                 rows = await conn.fetch("""
-                    SELECT "AcSalesmanID" as staff_id, "AcSalesmanName" as name, "AcLocationID" as outlet_id
-                    FROM "AcSalesman"
-                    WHERE "AcLocationID" = $1
-                    ORDER BY "AcSalesmanName"
+                    SELECT DISTINCT
+                        s."AcSalesmanID" as staff_id,
+                        s."AcSalesmanName" as name,
+                        $1 as outlet_id
+                    FROM "AcSalesman" s
+                    INNER JOIN analytics.mv_staff_daily_kpi k ON s."AcSalesmanID" = k.staff_id
+                    WHERE k.outlet_id = $1
+                    ORDER BY s."AcSalesmanName"
                     LIMIT $2
                 """, outlet_id, limit)
             else:
+                # Get all staff with their most recent outlet
                 rows = await conn.fetch("""
-                    SELECT "AcSalesmanID" as staff_id, "AcSalesmanName" as name, "AcLocationID" as outlet_id
-                    FROM "AcSalesman"
-                    ORDER BY "AcSalesmanName"
+                    SELECT DISTINCT ON (s."AcSalesmanID")
+                        s."AcSalesmanID" as staff_id,
+                        s."AcSalesmanName" as name,
+                        k.outlet_id
+                    FROM "AcSalesman" s
+                    LEFT JOIN analytics.mv_staff_daily_kpi k ON s."AcSalesmanID" = k.staff_id
+                    ORDER BY s."AcSalesmanID", k.sale_date DESC NULLS LAST
                     LIMIT $1
                 """, limit)
 
