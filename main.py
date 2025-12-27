@@ -304,7 +304,7 @@ async def get_my_dashboard(
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None)
 ):
-    """Get personal KPI dashboard for a staff member."""
+    """Get personal KPI dashboard for a staff member - REAL-TIME from base tables."""
     if not start_date:
         start_date = date.today().replace(day=1)
     if not end_date:
@@ -312,24 +312,51 @@ async def get_my_dashboard(
 
     try:
         async with pool.acquire() as conn:
-            # Get aggregated KPIs from materialized view
+            # REAL-TIME: Query base tables directly for live data
             summary = await conn.fetchrow("""
+                WITH sales_data AS (
+                    SELECT
+                        d."AcSalesmanID" AS staff_id,
+                        m."AcLocationID" AS outlet_id,
+                        COUNT(DISTINCT m."DocumentNo") AS transactions,
+                        SUM(d."ItemTotal") AS total_sales,
+                        SUM(d."ItemTotal" - COALESCE(d."ItemCost", 0)) AS gross_profit,
+                        SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END) AS house_brand_sales,
+                        SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotal" ELSE 0 END) AS focused_1_sales,
+                        SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotal" ELSE 0 END) AS focused_2_sales,
+                        SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotal" ELSE 0 END) AS focused_3_sales,
+                        SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END) AS clearance_sales
+                    FROM "AcCSD" d
+                    INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                    LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                    WHERE d."AcSalesmanID" = $1
+                      AND m."DocumentDate"::date BETWEEN $2 AND $3
+                    GROUP BY d."AcSalesmanID", m."AcLocationID"
+                ),
+                pwp_data AS (
+                    SELECT
+                        d."AcSalesmanID" AS staff_id,
+                        SUM(d."ItemTotal") AS pwp_sales
+                    FROM "AcCSDPromotionType" pt
+                    INNER JOIN "AcCSD" d ON pt."DocumentNo" = d."DocumentNo" AND pt."ItemNo" = d."ItemNo"
+                    INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                    WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
+                      AND d."AcSalesmanID" = $1
+                      AND m."DocumentDate"::date BETWEEN $2 AND $3
+                    GROUP BY d."AcSalesmanID"
+                )
                 SELECT
-                    staff_id,
-                    outlet_id,
-                    SUM(transactions) as transactions,
-                    SUM(total_sales) as total_sales,
-                    SUM(gross_profit) as gross_profit,
-                    SUM(house_brand_sales) as house_brand_sales,
-                    SUM(focused_1_sales) as focused_1_sales,
-                    SUM(COALESCE(focused_2_sales, 0)) as focused_2_sales,
-                    SUM(COALESCE(focused_3_sales, 0)) as focused_3_sales,
-                    SUM(COALESCE(pwp_sales, 0)) as pwp_sales,
-                    SUM(COALESCE(clearance_sales, 0)) as clearance_sales
-                FROM analytics.mv_staff_daily_kpi
-                WHERE staff_id = $1
-                  AND sale_date BETWEEN $2 AND $3
-                GROUP BY staff_id, outlet_id
+                    sd.staff_id, sd.outlet_id, sd.transactions,
+                    ROUND(sd.total_sales, 2) AS total_sales,
+                    ROUND(sd.gross_profit, 2) AS gross_profit,
+                    ROUND(sd.house_brand_sales, 2) AS house_brand_sales,
+                    ROUND(sd.focused_1_sales, 2) AS focused_1_sales,
+                    ROUND(sd.focused_2_sales, 2) AS focused_2_sales,
+                    ROUND(sd.focused_3_sales, 2) AS focused_3_sales,
+                    ROUND(COALESCE(pd.pwp_sales, 0), 2) AS pwp_sales,
+                    ROUND(sd.clearance_sales, 2) AS clearance_sales
+                FROM sales_data sd
+                LEFT JOIN pwp_data pd ON sd.staff_id = pd.staff_id
             """, staff_id, start_date, end_date)
 
             if not summary:
@@ -353,12 +380,19 @@ async def get_my_dashboard(
                   AND month = DATE_TRUNC('month', $2::date)
             """, staff_id, start_date)
 
-            # Get daily breakdown
+            # Get daily breakdown - REAL-TIME from base tables
             daily = await conn.fetch("""
-                SELECT sale_date, transactions, total_sales, house_brand_sales
-                FROM analytics.mv_staff_daily_kpi
-                WHERE staff_id = $1
-                  AND sale_date BETWEEN $2 AND $3
+                SELECT
+                    m."DocumentDate"::date AS sale_date,
+                    COUNT(DISTINCT m."DocumentNo") AS transactions,
+                    SUM(d."ItemTotal") AS total_sales,
+                    SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END) AS house_brand_sales
+                FROM "AcCSD" d
+                INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                WHERE d."AcSalesmanID" = $1
+                  AND m."DocumentDate"::date BETWEEN $2 AND $3
+                GROUP BY m."DocumentDate"::date
                 ORDER BY sale_date
             """, staff_id, start_date, end_date)
 
