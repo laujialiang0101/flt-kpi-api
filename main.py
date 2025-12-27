@@ -500,9 +500,10 @@ async def get_leaderboard(
     scope: str = Query("outlet", regex="^(outlet|company)$"),
     outlet_id: Optional[str] = Query(None),
     month: Optional[str] = Query(None, description="Month in YYYY-MM format"),
+    staff_id: Optional[str] = Query(None, description="Current user's staff ID to include their position"),
     limit: int = Query(20, ge=1, le=100)
 ):
-    """Get staff rankings leaderboard."""
+    """Get staff rankings leaderboard. Returns top N + logged-in user's position if not in top N."""
     if month:
         try:
             period = datetime.strptime(month, "%Y-%m").date()
@@ -513,35 +514,100 @@ async def get_leaderboard(
 
     async with pool.acquire() as conn:
         if scope == "outlet" and outlet_id:
+            # Outlet scope: Show staff ASSIGNED to this outlet (by AcSalesmanGroupID)
+            # with their aggregated sales across all outlets they worked at
             rows = await conn.fetch("""
-                SELECT
-                    r.outlet_rank_sales as rank,
-                    r.staff_id,
-                    s."AcSalesmanName" as staff_name,
-                    r.outlet_id,
-                    r.total_sales,
-                    r.house_brand_sales,
-                    r.focused_1_sales,
-                    r.focused_2_sales,
-                    r.focused_3_sales,
-                    r.pwp_sales,
-                    r.clearance_sales,
-                    r.transactions,
-                    r.sales_percentile
-                FROM analytics.mv_staff_rankings r
-                LEFT JOIN "AcSalesman" s ON r.staff_id = s."AcSalesmanID"
-                WHERE r.month = DATE_TRUNC('month', $1::date)
-                  AND r.outlet_id = $2
-                ORDER BY r.outlet_rank_sales
+                WITH outlet_staff_rankings AS (
+                    SELECT
+                        s."AcSalesmanID" as staff_id,
+                        s."AcSalesmanName" as staff_name,
+                        s."AcSalesmanGroupID" as assigned_outlet,
+                        COALESCE(SUM(r.total_sales), 0) as total_sales,
+                        COALESCE(SUM(r.house_brand_sales), 0) as house_brand_sales,
+                        COALESCE(SUM(r.focused_1_sales), 0) as focused_1_sales,
+                        COALESCE(SUM(r.focused_2_sales), 0) as focused_2_sales,
+                        COALESCE(SUM(r.focused_3_sales), 0) as focused_3_sales,
+                        COALESCE(SUM(r.pwp_sales), 0) as pwp_sales,
+                        COALESCE(SUM(r.clearance_sales), 0) as clearance_sales,
+                        COALESCE(SUM(r.transactions), 0) as transactions
+                    FROM "AcSalesman" s
+                    LEFT JOIN analytics.mv_staff_rankings r
+                        ON s."AcSalesmanID" = r.staff_id
+                        AND r.month = DATE_TRUNC('month', $1::date)
+                    WHERE s."AcSalesmanGroupID" = $2
+                      AND s."Active" = 'Y'
+                    GROUP BY s."AcSalesmanID", s."AcSalesmanName", s."AcSalesmanGroupID"
+                ),
+                ranked AS (
+                    SELECT *,
+                        ROW_NUMBER() OVER (ORDER BY total_sales DESC) as rank,
+                        PERCENT_RANK() OVER (ORDER BY total_sales) * 100 as sales_percentile
+                    FROM outlet_staff_rankings
+                )
+                SELECT * FROM ranked
+                ORDER BY rank
                 LIMIT $3
             """, period, outlet_id, limit)
+
+            # If staff_id provided, check if they're in the results, if not get their position
+            user_position = None
+            if staff_id:
+                staff_ids_in_results = [row['staff_id'] for row in rows]
+                if staff_id not in staff_ids_in_results:
+                    user_row = await conn.fetchrow("""
+                        WITH outlet_staff_rankings AS (
+                            SELECT
+                                s."AcSalesmanID" as staff_id,
+                                s."AcSalesmanName" as staff_name,
+                                s."AcSalesmanGroupID" as assigned_outlet,
+                                COALESCE(SUM(r.total_sales), 0) as total_sales,
+                                COALESCE(SUM(r.house_brand_sales), 0) as house_brand_sales,
+                                COALESCE(SUM(r.focused_1_sales), 0) as focused_1_sales,
+                                COALESCE(SUM(r.focused_2_sales), 0) as focused_2_sales,
+                                COALESCE(SUM(r.focused_3_sales), 0) as focused_3_sales,
+                                COALESCE(SUM(r.pwp_sales), 0) as pwp_sales,
+                                COALESCE(SUM(r.clearance_sales), 0) as clearance_sales,
+                                COALESCE(SUM(r.transactions), 0) as transactions
+                            FROM "AcSalesman" s
+                            LEFT JOIN analytics.mv_staff_rankings r
+                                ON s."AcSalesmanID" = r.staff_id
+                                AND r.month = DATE_TRUNC('month', $1::date)
+                            WHERE s."AcSalesmanGroupID" = $2
+                              AND s."Active" = 'Y'
+                            GROUP BY s."AcSalesmanID", s."AcSalesmanName", s."AcSalesmanGroupID"
+                        ),
+                        ranked AS (
+                            SELECT *,
+                                ROW_NUMBER() OVER (ORDER BY total_sales DESC) as rank,
+                                PERCENT_RANK() OVER (ORDER BY total_sales) * 100 as sales_percentile
+                            FROM outlet_staff_rankings
+                        )
+                        SELECT * FROM ranked WHERE staff_id = $3
+                    """, period, outlet_id, staff_id)
+                    if user_row:
+                        user_position = {
+                            "rank": user_row['rank'],
+                            "staff_id": user_row['staff_id'],
+                            "staff_name": user_row['staff_name'] or "Unknown",
+                            "outlet_id": user_row['assigned_outlet'],
+                            "total_sales": float(user_row['total_sales'] or 0),
+                            "house_brand": float(user_row['house_brand_sales'] or 0),
+                            "focused_1": float(user_row['focused_1_sales'] or 0),
+                            "focused_2": float(user_row['focused_2_sales'] or 0),
+                            "focused_3": float(user_row['focused_3_sales'] or 0),
+                            "pwp": float(user_row['pwp_sales'] or 0),
+                            "clearance": float(user_row['clearance_sales'] or 0),
+                            "transactions": int(user_row['transactions'] or 0),
+                            "percentile": float(user_row['sales_percentile']) if user_row['sales_percentile'] else None
+                        }
         else:
+            # Company scope: Show all staff ranked company-wide
             rows = await conn.fetch("""
                 SELECT
                     r.company_rank_sales as rank,
                     r.staff_id,
                     s."AcSalesmanName" as staff_name,
-                    r.outlet_id,
+                    s."AcSalesmanGroupID" as outlet_id,
                     r.total_sales,
                     r.house_brand_sales,
                     r.focused_1_sales,
@@ -558,30 +624,77 @@ async def get_leaderboard(
                 LIMIT $2
             """, period, limit)
 
+            # If staff_id provided, check if they're in the results
+            user_position = None
+            if staff_id:
+                staff_ids_in_results = [row['staff_id'] for row in rows]
+                if staff_id not in staff_ids_in_results:
+                    user_row = await conn.fetchrow("""
+                        SELECT
+                            r.company_rank_sales as rank,
+                            r.staff_id,
+                            s."AcSalesmanName" as staff_name,
+                            s."AcSalesmanGroupID" as outlet_id,
+                            r.total_sales,
+                            r.house_brand_sales,
+                            r.focused_1_sales,
+                            r.focused_2_sales,
+                            r.focused_3_sales,
+                            r.pwp_sales,
+                            r.clearance_sales,
+                            r.transactions,
+                            r.sales_percentile
+                        FROM analytics.mv_staff_rankings r
+                        LEFT JOIN "AcSalesman" s ON r.staff_id = s."AcSalesmanID"
+                        WHERE r.month = DATE_TRUNC('month', $1::date)
+                          AND r.staff_id = $2
+                    """, period, staff_id)
+                    if user_row:
+                        user_position = {
+                            "rank": user_row['rank'],
+                            "staff_id": user_row['staff_id'],
+                            "staff_name": user_row['staff_name'] or "Unknown",
+                            "outlet_id": user_row['outlet_id'],
+                            "total_sales": float(user_row['total_sales'] or 0),
+                            "house_brand": float(user_row['house_brand_sales'] or 0),
+                            "focused_1": float(user_row['focused_1_sales'] or 0),
+                            "focused_2": float(user_row['focused_2_sales'] or 0),
+                            "focused_3": float(user_row['focused_3_sales'] or 0),
+                            "pwp": float(user_row['pwp_sales'] or 0),
+                            "clearance": float(user_row['clearance_sales'] or 0),
+                            "transactions": int(user_row['transactions'] or 0),
+                            "percentile": float(user_row['sales_percentile']) if user_row['sales_percentile'] else None
+                        }
+
+        response_data = {
+            "period": period.strftime("%Y-%m"),
+            "scope": scope,
+            "rankings": [
+                {
+                    "rank": row['rank'],
+                    "staff_id": row['staff_id'],
+                    "staff_name": row['staff_name'] or "Unknown",
+                    "outlet_id": row.get('outlet_id') or row.get('assigned_outlet'),
+                    "total_sales": float(row['total_sales'] or 0),
+                    "house_brand": float(row['house_brand_sales'] or 0),
+                    "focused_1": float(row['focused_1_sales'] or 0),
+                    "focused_2": float(row['focused_2_sales'] or 0),
+                    "focused_3": float(row['focused_3_sales'] or 0),
+                    "pwp": float(row['pwp_sales'] or 0),
+                    "clearance": float(row['clearance_sales'] or 0),
+                    "transactions": int(row['transactions'] or 0),
+                    "percentile": float(row['sales_percentile']) if row['sales_percentile'] else None
+                }
+                for row in rows
+            ]
+        }
+
+        if user_position:
+            response_data["user_position"] = user_position
+
         return {
             "success": True,
-            "data": {
-                "period": period.strftime("%Y-%m"),
-                "scope": scope,
-                "rankings": [
-                    {
-                        "rank": row['rank'],
-                        "staff_id": row['staff_id'],
-                        "staff_name": row['staff_name'] or "Unknown",
-                        "outlet_id": row['outlet_id'],
-                        "total_sales": float(row['total_sales'] or 0),
-                        "house_brand": float(row['house_brand_sales'] or 0),
-                        "focused_1": float(row['focused_1_sales'] or 0),
-                        "focused_2": float(row['focused_2_sales'] or 0),
-                        "focused_3": float(row['focused_3_sales'] or 0),
-                        "pwp": float(row['pwp_sales'] or 0),
-                        "clearance": float(row['clearance_sales'] or 0),
-                        "transactions": int(row['transactions'] or 0),
-                        "percentile": float(row['sales_percentile']) if row['sales_percentile'] else None
-                    }
-                    for row in rows
-                ]
-            }
+            "data": response_data
         }
 
 
@@ -623,28 +736,32 @@ async def get_team_overview(
         """, outlet_id)
 
         # Staff performance - all 8 KPIs
+        # Filter by AcSalesmanGroupID (staff's assigned outlet) not sales location
         staff = await conn.fetch("""
             SELECT
-                k.staff_id,
+                s."AcSalesmanID" as staff_id,
                 s."AcSalesmanName" as staff_name,
-                SUM(k.transactions) as transactions,
-                SUM(k.total_sales) as total_sales,
-                SUM(k.house_brand_sales) as house_brand_sales,
-                SUM(k.focused_1_sales) as focused_1_sales,
-                SUM(COALESCE(k.focused_2_sales, 0)) as focused_2_sales,
-                SUM(COALESCE(k.focused_3_sales, 0)) as focused_3_sales,
-                SUM(COALESCE(k.pwp_sales, 0)) as pwp_sales,
-                SUM(COALESCE(k.clearance_sales, 0)) as clearance_sales,
+                COALESCE(SUM(k.transactions), 0) as transactions,
+                COALESCE(SUM(k.total_sales), 0) as total_sales,
+                COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
+                COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
+                COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
+                COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
+                COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
+                COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
                 r.outlet_rank_sales as rank
-            FROM analytics.mv_staff_daily_kpi k
-            LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
+            FROM "AcSalesman" s
+            LEFT JOIN analytics.mv_staff_daily_kpi k
+                ON s."AcSalesmanID" = k.staff_id
+                AND k.sale_date BETWEEN $2 AND $3
             LEFT JOIN analytics.mv_staff_rankings r
-                ON k.staff_id = r.staff_id
+                ON s."AcSalesmanID" = r.staff_id
+                AND r.outlet_id = $1
                 AND r.month = DATE_TRUNC('month', $2::date)
-            WHERE k.outlet_id = $1
-              AND k.sale_date BETWEEN $2 AND $3
-            GROUP BY k.staff_id, s."AcSalesmanName", r.outlet_rank_sales
-            ORDER BY SUM(k.total_sales) DESC
+            WHERE s."AcSalesmanGroupID" = $1
+              AND s."Active" = 'Y'
+            GROUP BY s."AcSalesmanID", s."AcSalesmanName", r.outlet_rank_sales
+            ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
         """, outlet_id, start_date, end_date)
 
         return {
