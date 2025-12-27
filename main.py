@@ -1369,6 +1369,19 @@ async def debug_sales_breakdown(
                   AND m."DocumentDate"::date BETWEEN $2 AND $3
             """, outlet_id, start_date, end_date)
 
+            # Check for voided/cancelled transactions
+            voided_check = await conn.fetch("""
+                SELECT
+                    m."Cancelled" as cancelled_flag,
+                    COUNT(DISTINCT m."DocumentNo") as doc_count,
+                    SUM(d."ItemTotal") as total
+                FROM "AcCSD" d
+                INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                WHERE m."AcLocationID" = $1
+                  AND m."DocumentDate"::date BETWEEN $2 AND $3
+                GROUP BY m."Cancelled"
+            """, outlet_id, start_date, end_date)
+
             # Invoice Sales from AcCusInvoiceD + AcCusInvoiceM
             invoice_sales = await conn.fetchrow("""
                 SELECT
@@ -1394,6 +1407,15 @@ async def debug_sales_breakdown(
             invoice_total = float(invoice_sales['total'] or 0)
             combined = cash_total + invoice_total
 
+            # Format voided breakdown
+            voided_breakdown = []
+            for row in voided_check:
+                voided_breakdown.append({
+                    "cancelled_flag": row['cancelled_flag'],
+                    "doc_count": int(row['doc_count'] or 0),
+                    "total": round(float(row['total'] or 0), 2)
+                })
+
             return {
                 "success": True,
                 "outlet_id": outlet_id,
@@ -1409,6 +1431,9 @@ async def debug_sales_breakdown(
                     },
                     "combined_total": round(combined, 2),
                     "materialized_view_total": round(float(mv_total['total'] or 0), 2)
+                },
+                "voided_analysis": {
+                    "by_cancelled_flag": voided_breakdown
                 }
             }
 
