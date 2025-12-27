@@ -1369,17 +1369,38 @@ async def debug_sales_breakdown(
                   AND m."DocumentDate"::date BETWEEN $2 AND $3
             """, outlet_id, start_date, end_date)
 
-            # Check for voided/cancelled transactions
-            voided_check = await conn.fetch("""
+            # Check AcCSM columns for void/cancel fields
+            csm_columns = await conn.fetch("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'AcCSM'
+                AND column_name ILIKE '%void%' OR column_name ILIKE '%cancel%' OR column_name ILIKE '%status%'
+            """)
+
+            # Check for negative ItemTotal (returns/refunds)
+            negative_check = await conn.fetchrow("""
                 SELECT
-                    m."Cancelled" as cancelled_flag,
+                    COUNT(*) as negative_line_count,
+                    SUM(d."ItemTotal") as negative_total
+                FROM "AcCSD" d
+                INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                WHERE m."AcLocationID" = $1
+                  AND m."DocumentDate"::date BETWEEN $2 AND $3
+                  AND d."ItemTotal" < 0
+            """, outlet_id, start_date, end_date)
+
+            # Check by document type prefix
+            doc_type_check = await conn.fetch("""
+                SELECT
+                    LEFT(m."DocumentNo", 2) as doc_prefix,
                     COUNT(DISTINCT m."DocumentNo") as doc_count,
                     SUM(d."ItemTotal") as total
                 FROM "AcCSD" d
                 INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
                 WHERE m."AcLocationID" = $1
                   AND m."DocumentDate"::date BETWEEN $2 AND $3
-                GROUP BY m."Cancelled"
+                GROUP BY LEFT(m."DocumentNo", 2)
+                ORDER BY total DESC
             """, outlet_id, start_date, end_date)
 
             # Invoice Sales from AcCusInvoiceD + AcCusInvoiceM
@@ -1407,11 +1428,11 @@ async def debug_sales_breakdown(
             invoice_total = float(invoice_sales['total'] or 0)
             combined = cash_total + invoice_total
 
-            # Format voided breakdown
-            voided_breakdown = []
-            for row in voided_check:
-                voided_breakdown.append({
-                    "cancelled_flag": row['cancelled_flag'],
+            # Format document type breakdown
+            doc_type_breakdown = []
+            for row in doc_type_check:
+                doc_type_breakdown.append({
+                    "prefix": row['doc_prefix'],
                     "doc_count": int(row['doc_count'] or 0),
                     "total": round(float(row['total'] or 0), 2)
                 })
@@ -1432,8 +1453,13 @@ async def debug_sales_breakdown(
                     "combined_total": round(combined, 2),
                     "materialized_view_total": round(float(mv_total['total'] or 0), 2)
                 },
-                "voided_analysis": {
-                    "by_cancelled_flag": voided_breakdown
+                "analysis": {
+                    "csm_void_columns": [row['column_name'] for row in csm_columns],
+                    "negative_items": {
+                        "count": int(negative_check['negative_line_count'] or 0),
+                        "total": round(float(negative_check['negative_total'] or 0), 2)
+                    },
+                    "by_document_prefix": doc_type_breakdown
                 }
             }
 
