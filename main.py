@@ -429,6 +429,12 @@ async def get_leaderboard(
                     r.outlet_id,
                     r.total_sales,
                     r.house_brand_sales,
+                    r.focused_1_sales,
+                    r.focused_2_sales,
+                    r.focused_3_sales,
+                    r.pwp_sales,
+                    r.clearance_sales,
+                    r.transactions,
                     r.sales_percentile
                 FROM analytics.mv_staff_rankings r
                 LEFT JOIN "AcSalesman" s ON r.staff_id = s."AcSalesmanID"
@@ -446,6 +452,12 @@ async def get_leaderboard(
                     r.outlet_id,
                     r.total_sales,
                     r.house_brand_sales,
+                    r.focused_1_sales,
+                    r.focused_2_sales,
+                    r.focused_3_sales,
+                    r.pwp_sales,
+                    r.clearance_sales,
+                    r.transactions,
                     r.sales_percentile
                 FROM analytics.mv_staff_rankings r
                 LEFT JOIN "AcSalesman" s ON r.staff_id = s."AcSalesmanID"
@@ -467,6 +479,12 @@ async def get_leaderboard(
                         "outlet_id": row['outlet_id'],
                         "total_sales": float(row['total_sales'] or 0),
                         "house_brand": float(row['house_brand_sales'] or 0),
+                        "focused_1": float(row['focused_1_sales'] or 0),
+                        "focused_2": float(row['focused_2_sales'] or 0),
+                        "focused_3": float(row['focused_3_sales'] or 0),
+                        "pwp": float(row['pwp_sales'] or 0),
+                        "clearance": float(row['clearance_sales'] or 0),
+                        "transactions": int(row['transactions'] or 0),
                         "percentile": float(row['sales_percentile']) if row['sales_percentile'] else None
                     }
                     for row in rows
@@ -488,20 +506,31 @@ async def get_team_overview(
         end_date = date.today()
 
     async with pool.acquire() as conn:
-        # Outlet summary
+        # Outlet summary - all 8 KPIs
         outlet_summary = await conn.fetchrow("""
             SELECT
                 SUM(transactions) as transactions,
                 SUM(total_sales) as total_sales,
                 SUM(gross_profit) as gross_profit,
                 SUM(house_brand_sales) as house_brand_sales,
-                SUM(pwp_clearance_total) as pwp_clearance_total
+                SUM(focused_1_sales) as focused_1_sales,
+                SUM(focused_2_sales) as focused_2_sales,
+                SUM(focused_3_sales) as focused_3_sales,
+                SUM(pwp_sales) as pwp_sales,
+                SUM(clearance_sales) as clearance_sales
             FROM analytics.mv_outlet_daily_kpi
             WHERE outlet_id = $1
               AND sale_date BETWEEN $2 AND $3
         """, outlet_id, start_date, end_date)
 
-        # Staff performance
+        # Get outlet name
+        outlet_info = await conn.fetchrow("""
+            SELECT "AcLocationDesc" as outlet_name
+            FROM "AcLocation"
+            WHERE "AcLocationID" = $1
+        """, outlet_id)
+
+        # Staff performance - all 8 KPIs
         staff = await conn.fetch("""
             SELECT
                 k.staff_id,
@@ -509,6 +538,11 @@ async def get_team_overview(
                 SUM(k.transactions) as transactions,
                 SUM(k.total_sales) as total_sales,
                 SUM(k.house_brand_sales) as house_brand_sales,
+                SUM(k.focused_1_sales) as focused_1_sales,
+                SUM(COALESCE(k.focused_2_sales, 0)) as focused_2_sales,
+                SUM(COALESCE(k.focused_3_sales, 0)) as focused_3_sales,
+                SUM(COALESCE(k.pwp_sales, 0)) as pwp_sales,
+                SUM(COALESCE(k.clearance_sales, 0)) as clearance_sales,
                 r.outlet_rank_sales as rank
             FROM analytics.mv_staff_daily_kpi k
             LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
@@ -525,6 +559,7 @@ async def get_team_overview(
             "success": True,
             "data": {
                 "outlet_id": outlet_id,
+                "outlet_name": outlet_info['outlet_name'] if outlet_info else "Unknown Outlet",
                 "period": {
                     "start": start_date.isoformat(),
                     "end": end_date.isoformat()
@@ -533,7 +568,11 @@ async def get_team_overview(
                     "total_sales": float(outlet_summary['total_sales'] or 0),
                     "gross_profit": float(outlet_summary['gross_profit'] or 0),
                     "house_brand": float(outlet_summary['house_brand_sales'] or 0),
-                    "pwp_clearance": float(outlet_summary['pwp_clearance_total'] or 0),
+                    "focused_1": float(outlet_summary['focused_1_sales'] or 0),
+                    "focused_2": float(outlet_summary['focused_2_sales'] or 0),
+                    "focused_3": float(outlet_summary['focused_3_sales'] or 0),
+                    "pwp": float(outlet_summary['pwp_sales'] or 0),
+                    "clearance": float(outlet_summary['clearance_sales'] or 0),
                     "transactions": int(outlet_summary['transactions'] or 0),
                     "staff_count": len(staff)
                 },
@@ -543,6 +582,11 @@ async def get_team_overview(
                         "staff_name": row['staff_name'] or "Unknown",
                         "total_sales": float(row['total_sales'] or 0),
                         "house_brand": float(row['house_brand_sales'] or 0),
+                        "focused_1": float(row['focused_1_sales'] or 0),
+                        "focused_2": float(row['focused_2_sales'] or 0),
+                        "focused_3": float(row['focused_3_sales'] or 0),
+                        "pwp": float(row['pwp_sales'] or 0),
+                        "clearance": float(row['clearance_sales'] or 0),
                         "transactions": int(row['transactions'] or 0),
                         "rank": row['rank']
                     }
