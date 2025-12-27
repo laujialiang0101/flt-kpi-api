@@ -304,7 +304,10 @@ async def get_my_dashboard(
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None)
 ):
-    """Get personal KPI dashboard for a staff member - REAL-TIME from base tables."""
+    """Get personal KPI dashboard for a staff member - REAL-TIME from base tables.
+
+    Includes BOTH cash sales (AcCSD) AND invoice sales (AcCusInvoiceD).
+    """
     if not start_date:
         start_date = date.today().replace(day=1)
     if not end_date:
@@ -313,25 +316,57 @@ async def get_my_dashboard(
     try:
         async with pool.acquire() as conn:
             # REAL-TIME: Query base tables directly for live data
+            # Combines BOTH cash sales (AcCSD) and invoice sales (AcCusInvoiceD)
             summary = await conn.fetchrow("""
-                WITH sales_data AS (
+                WITH combined_sales AS (
+                    -- Cash Sales (AcCSD + AcCSM)
                     SELECT
                         d."AcSalesmanID" AS staff_id,
                         m."AcLocationID" AS outlet_id,
-                        COUNT(DISTINCT m."DocumentNo") AS transactions,
-                        SUM(d."ItemTotal") AS total_sales,
-                        SUM(d."ItemTotal" - COALESCE(d."ItemCost", 0)) AS gross_profit,
-                        SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END) AS house_brand_sales,
-                        SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotal" ELSE 0 END) AS focused_1_sales,
-                        SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotal" ELSE 0 END) AS focused_2_sales,
-                        SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotal" ELSE 0 END) AS focused_3_sales,
-                        SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END) AS clearance_sales
+                        m."DocumentNo" AS doc_no,
+                        d."ItemTotal" AS amount,
+                        COALESCE(d."ItemCost", 0) AS cost,
+                        s."AcStockUDGroup1ID" AS stock_group,
+                        d."AcStockID",
+                        d."AcStockUOMID"
                     FROM "AcCSD" d
                     INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
                     LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
                     WHERE d."AcSalesmanID" = $1
                       AND m."DocumentDate"::date BETWEEN $2 AND $3
-                    GROUP BY d."AcSalesmanID", m."AcLocationID"
+
+                    UNION ALL
+
+                    -- Invoice Sales (AcCusInvoiceD + AcCusInvoiceM)
+                    SELECT
+                        d."AcSalesmanID" AS staff_id,
+                        m."AcLocationID" AS outlet_id,
+                        m."AcCusInvoiceMID" AS doc_no,
+                        d."ItemTotalPrice" AS amount,
+                        0 AS cost,
+                        s."AcStockUDGroup1ID" AS stock_group,
+                        d."AcStockID",
+                        d."AcStockUOMID"
+                    FROM "AcCusInvoiceD" d
+                    INNER JOIN "AcCusInvoiceM" m ON d."AcCusInvoiceMID" = m."AcCusInvoiceMID"
+                    LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                    WHERE d."AcSalesmanID" = $1
+                      AND m."DocumentDate"::date BETWEEN $2 AND $3
+                ),
+                sales_data AS (
+                    SELECT
+                        staff_id,
+                        MAX(outlet_id) AS outlet_id,
+                        COUNT(DISTINCT doc_no) AS transactions,
+                        SUM(amount) AS total_sales,
+                        SUM(amount - cost) AS gross_profit,
+                        SUM(CASE WHEN stock_group = 'HOUSE BRAND' THEN amount ELSE 0 END) AS house_brand_sales,
+                        SUM(CASE WHEN stock_group = 'FOCUSED ITEM 1' THEN amount ELSE 0 END) AS focused_1_sales,
+                        SUM(CASE WHEN stock_group = 'FOCUSED ITEM 2' THEN amount ELSE 0 END) AS focused_2_sales,
+                        SUM(CASE WHEN stock_group = 'FOCUSED ITEM 3' THEN amount ELSE 0 END) AS focused_3_sales,
+                        SUM(CASE WHEN stock_group = 'STOCK CLEARANCE' THEN amount ELSE 0 END) AS clearance_sales
+                    FROM combined_sales
+                    GROUP BY staff_id
                 ),
                 pwp_data AS (
                     SELECT
@@ -380,19 +415,42 @@ async def get_my_dashboard(
                   AND month = DATE_TRUNC('month', $2::date)
             """, staff_id, start_date)
 
-            # Get daily breakdown - REAL-TIME from base tables
+            # Get daily breakdown - REAL-TIME from base tables (includes invoice sales)
             daily = await conn.fetch("""
+                WITH combined_daily AS (
+                    -- Cash Sales
+                    SELECT
+                        m."DocumentDate"::date AS sale_date,
+                        m."DocumentNo" AS doc_no,
+                        d."ItemTotal" AS amount,
+                        s."AcStockUDGroup1ID" AS stock_group
+                    FROM "AcCSD" d
+                    INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                    LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                    WHERE d."AcSalesmanID" = $1
+                      AND m."DocumentDate"::date BETWEEN $2 AND $3
+
+                    UNION ALL
+
+                    -- Invoice Sales
+                    SELECT
+                        m."DocumentDate"::date AS sale_date,
+                        m."AcCusInvoiceMID" AS doc_no,
+                        d."ItemTotalPrice" AS amount,
+                        s."AcStockUDGroup1ID" AS stock_group
+                    FROM "AcCusInvoiceD" d
+                    INNER JOIN "AcCusInvoiceM" m ON d."AcCusInvoiceMID" = m."AcCusInvoiceMID"
+                    LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                    WHERE d."AcSalesmanID" = $1
+                      AND m."DocumentDate"::date BETWEEN $2 AND $3
+                )
                 SELECT
-                    m."DocumentDate"::date AS sale_date,
-                    COUNT(DISTINCT m."DocumentNo") AS transactions,
-                    SUM(d."ItemTotal") AS total_sales,
-                    SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END) AS house_brand_sales
-                FROM "AcCSD" d
-                INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
-                LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
-                WHERE d."AcSalesmanID" = $1
-                  AND m."DocumentDate"::date BETWEEN $2 AND $3
-                GROUP BY m."DocumentDate"::date
+                    sale_date,
+                    COUNT(DISTINCT doc_no) AS transactions,
+                    SUM(amount) AS total_sales,
+                    SUM(CASE WHEN stock_group = 'HOUSE BRAND' THEN amount ELSE 0 END) AS house_brand_sales
+                FROM combined_daily
+                GROUP BY sale_date
                 ORDER BY sale_date
             """, staff_id, start_date, end_date)
 
