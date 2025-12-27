@@ -322,7 +322,8 @@ async def get_my_dashboard(
                     SUM(gross_profit) as gross_profit,
                     SUM(house_brand_sales) as house_brand_sales,
                     SUM(focused_1_sales) as focused_1_sales,
-                    SUM(COALESCE(focused_2_3_sales, 0)) as focused_2_3_sales,
+                    SUM(COALESCE(focused_2_sales, 0)) as focused_2_sales,
+                    SUM(COALESCE(focused_3_sales, 0)) as focused_3_sales,
                     SUM(COALESCE(pwp_sales, 0)) as pwp_sales,
                     SUM(COALESCE(clearance_sales, 0)) as clearance_sales
                 FROM analytics.mv_staff_daily_kpi
@@ -376,7 +377,8 @@ async def get_my_dashboard(
                         "total_sales": float(summary['total_sales'] or 0),
                         "house_brand": float(summary['house_brand_sales'] or 0),
                         "focused_1": float(summary['focused_1_sales'] or 0),
-                        "focused_2_3": float(summary['focused_2_3_sales'] or 0),
+                        "focused_2": float(summary['focused_2_sales'] or 0),
+                        "focused_3": float(summary['focused_3_sales'] or 0),
                         "pwp": float(summary['pwp_sales'] or 0),
                         "clearance": float(summary['clearance_sales'] or 0),
                         "transactions": int(summary['transactions'] or 0),
@@ -600,7 +602,8 @@ async def get_my_targets(
                     SUM(total_sales) as total_sales,
                     SUM(house_brand_sales) as house_brand,
                     SUM(focused_1_sales) as focused_1,
-                    SUM(COALESCE(focused_2_3_sales, 0)) as focused_2_3,
+                    SUM(COALESCE(focused_2_sales, 0)) as focused_2,
+                    SUM(COALESCE(focused_3_sales, 0)) as focused_3,
                     SUM(COALESCE(clearance_sales, 0)) as clearance,
                     SUM(COALESCE(pwp_sales, 0)) as pwp,
                     SUM(transactions) as transactions
@@ -613,12 +616,6 @@ async def get_my_targets(
                 if not target_val or target_val == 0:
                     return None
                 return round((float(current_val or 0) / float(target_val)) * 100, 1)
-
-            # Calculate combined focused target (2+3) for comparison
-            focused_2_3_target = (
-                float(targets['focused_item_2_target'] or 0) +
-                float(targets['focused_item_3_target'] or 0)
-            ) if targets else 0
 
             result = {
                 "total_sales": {
@@ -639,10 +636,17 @@ async def get_my_targets(
                     "progress": calc_progress(current['focused_1'] if current else 0,
                                             targets['focused_item_1_target'] if targets else 0)
                 },
-                "focused_2_3": {
-                    "target": focused_2_3_target,
-                    "current": float(current['focused_2_3'] or 0) if current else 0,
-                    "progress": calc_progress(current['focused_2_3'] if current else 0, focused_2_3_target)
+                "focused_2": {
+                    "target": float(targets['focused_item_2_target'] or 0) if targets else 0,
+                    "current": float(current['focused_2'] or 0) if current else 0,
+                    "progress": calc_progress(current['focused_2'] if current else 0,
+                                            targets['focused_item_2_target'] if targets else 0)
+                },
+                "focused_3": {
+                    "target": float(targets['focused_item_3_target'] or 0) if targets else 0,
+                    "current": float(current['focused_3'] or 0) if current else 0,
+                    "progress": calc_progress(current['focused_3'] if current else 0,
+                                            targets['focused_item_3_target'] if targets else 0)
                 },
                 "clearance": {
                     "target": float(targets['stock_clearance_target'] or 0) if targets else 0,
