@@ -1011,6 +1011,57 @@ async def get_staff_list(
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
+# ============================================================================
+# Push Notification Endpoints
+# ============================================================================
+
+class PushSubscription(BaseModel):
+    staff_id: str
+    subscription: dict  # Contains endpoint, keys.p256dh, keys.auth
+
+
+@app.post("/api/v1/push/subscribe")
+async def subscribe_to_push(data: PushSubscription):
+    """Subscribe to push notifications."""
+    try:
+        sub = data.subscription
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO kpi.push_subscriptions (staff_id, endpoint, p256dh, auth, user_agent)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (staff_id, endpoint)
+                DO UPDATE SET p256dh = $3, auth = $4, last_used_at = NOW()
+            """,
+                data.staff_id,
+                sub.get('endpoint'),
+                sub.get('keys', {}).get('p256dh'),
+                sub.get('keys', {}).get('auth'),
+                None  # user_agent can be added later
+            )
+            return {"success": True, "message": "Subscribed to push notifications"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Subscription failed: {str(e)}")
+
+
+class UnsubscribeRequest(BaseModel):
+    staff_id: str
+    endpoint: str
+
+
+@app.post("/api/v1/push/unsubscribe")
+async def unsubscribe_from_push(data: UnsubscribeRequest):
+    """Unsubscribe from push notifications."""
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                DELETE FROM kpi.push_subscriptions
+                WHERE staff_id = $1 AND endpoint = $2
+            """, data.staff_id, data.endpoint)
+            return {"success": True, "message": "Unsubscribed from push notifications"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unsubscribe failed: {str(e)}")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
