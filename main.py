@@ -324,6 +324,9 @@ async def get_my_dashboard(
         end_date = date.today()
 
     today = date.today()
+    # Use timestamp range for index efficiency (avoid ::date cast which causes seq scan)
+    today_start = datetime.combine(today, datetime.min.time())
+    today_end = datetime.combine(today + timedelta(days=1), datetime.min.time())
 
     try:
         async with pool.acquire() as conn:
@@ -349,7 +352,8 @@ async def get_my_dashboard(
                 GROUP BY staff_id
             """, staff_id, start_date, end_date, today)
 
-            # Step 2: Get today's data from base tables (real-time, small dataset)
+            # Step 2: Get today's data from base tables (real-time)
+            # Use timestamp range for index efficiency (not ::date cast)
             today_summary = None
             if end_date >= today:
                 today_summary = await conn.fetchrow("""
@@ -361,28 +365,31 @@ async def get_my_dashboard(
                             d."ItemTotal" AS amount,
                             COALESCE(d."ItemCost", 0) AS cost,
                             s."AcStockUDGroup1ID" AS stock_group
-                        FROM "AcCSD" d
-                        INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                        FROM "AcCSM" m
+                        INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
                         LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
-                        WHERE d."AcSalesmanID" = $1 AND m."DocumentDate"::date = $2
+                        WHERE m."DocumentDate" >= $2 AND m."DocumentDate" < $3
+                          AND d."AcSalesmanID" = $1
 
                         UNION ALL
 
                         SELECT
                             d."AcSalesmanID", m."AcLocationID", m."AcCusInvoiceMID",
                             d."ItemTotalPrice", 0, s."AcStockUDGroup1ID"
-                        FROM "AcCusInvoiceD" d
-                        INNER JOIN "AcCusInvoiceM" m ON d."AcCusInvoiceMID" = m."AcCusInvoiceMID"
+                        FROM "AcCusInvoiceM" m
+                        INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
                         LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
-                        WHERE d."AcSalesmanID" = $1 AND m."DocumentDate"::date = $2
+                        WHERE m."DocumentDate" >= $2 AND m."DocumentDate" < $3
+                          AND d."AcSalesmanID" = $1
                     ),
                     pwp AS (
                         SELECT SUM(d."ItemTotal") AS pwp_sales
-                        FROM "AcCSDPromotionType" pt
-                        INNER JOIN "AcCSD" d ON pt."DocumentNo" = d."DocumentNo" AND pt."ItemNo" = d."ItemNo"
-                        INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                        FROM "AcCSM" m
+                        INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
+                        INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
                         WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
-                          AND d."AcSalesmanID" = $1 AND m."DocumentDate"::date = $2
+                          AND m."DocumentDate" >= $2 AND m."DocumentDate" < $3
+                          AND d."AcSalesmanID" = $1
                     )
                     SELECT
                         MAX(outlet_id) as outlet_id,
@@ -396,7 +403,7 @@ async def get_my_dashboard(
                         SUM(CASE WHEN stock_group = 'STOCK CLEARANCE' THEN amount ELSE 0 END) AS clearance_sales,
                         (SELECT COALESCE(pwp_sales, 0) FROM pwp) AS pwp_sales
                     FROM combined_sales
-                """, staff_id, today)
+                """, staff_id, today_start, today_end)
 
             # Combine MV + today's data
             def safe_float(val):
@@ -634,6 +641,9 @@ async def get_team_overview(
         end_date = date.today()
 
     today = date.today()
+    # Use timestamp range for index efficiency (avoid ::date cast which causes seq scan)
+    today_start = datetime.combine(today, datetime.min.time())
+    today_end = datetime.combine(today + timedelta(days=1), datetime.min.time())
     staff_group = group_id or outlet_id
 
     async with pool.acquire() as conn:
@@ -657,29 +667,30 @@ async def get_team_overview(
         """, outlet_id, start_date, end_date, today)
 
         # Step 2: Today's data from base tables (real-time)
+        # Use timestamp range for index efficiency (not ::date cast)
         today_summary = None
         if end_date >= today:
             today_summary = await conn.fetchrow("""
                 WITH combined AS (
                     SELECT d."ItemTotal" as amount, d."ItemCost" as cost, s."AcStockUDGroup1ID" as stock_group, m."DocumentNo" as doc
-                    FROM "AcCSD" d
-                    INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                    FROM "AcCSM" m
+                    INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
                     LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
-                    WHERE m."AcLocationID" = $1 AND m."DocumentDate"::date = $2
+                    WHERE m."AcLocationID" = $1 AND m."DocumentDate" >= $2 AND m."DocumentDate" < $3
                     UNION ALL
                     SELECT d."ItemTotalPrice", 0, s."AcStockUDGroup1ID", m."AcCusInvoiceMID"
-                    FROM "AcCusInvoiceD" d
-                    INNER JOIN "AcCusInvoiceM" m ON d."AcCusInvoiceMID" = m."AcCusInvoiceMID"
+                    FROM "AcCusInvoiceM" m
+                    INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
                     LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
-                    WHERE m."AcLocationID" = $1 AND m."DocumentDate"::date = $2
+                    WHERE m."AcLocationID" = $1 AND m."DocumentDate" >= $2 AND m."DocumentDate" < $3
                 ),
                 pwp AS (
                     SELECT COALESCE(SUM(d."ItemTotal"), 0) as pwp_sales
-                    FROM "AcCSDPromotionType" pt
-                    INNER JOIN "AcCSD" d ON pt."DocumentNo" = d."DocumentNo" AND pt."ItemNo" = d."ItemNo"
-                    INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                    FROM "AcCSM" m
+                    INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
+                    INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
                     WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
-                      AND m."AcLocationID" = $1 AND m."DocumentDate"::date = $2
+                      AND m."AcLocationID" = $1 AND m."DocumentDate" >= $2 AND m."DocumentDate" < $3
                 )
                 SELECT
                     COUNT(DISTINCT doc) as transactions,
@@ -692,7 +703,7 @@ async def get_team_overview(
                     COALESCE(SUM(CASE WHEN stock_group = 'STOCK CLEARANCE' THEN amount ELSE 0 END), 0) as clearance_sales,
                     (SELECT pwp_sales FROM pwp) as pwp_sales
                 FROM combined
-            """, outlet_id, today)
+            """, outlet_id, today_start, today_end)
 
         # Combine MV + today
         def sf(val): return float(val) if val else 0.0
