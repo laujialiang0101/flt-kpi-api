@@ -223,38 +223,63 @@ async def login(request: LoginRequest):
             if user['password'] != request.password:
                 return {"success": False, "error": "Invalid credentials"}
 
-            # Get staff's group_id (assigned team) and outlet_id (physical work location)
-            staff_info = await conn.fetchrow("""
-                SELECT
-                    s."AcSalesmanGroupID" as group_id,
-                    COALESCE(
-                        (SELECT k.outlet_id FROM analytics.mv_staff_daily_kpi k
-                         WHERE k.staff_id = $1
-                         ORDER BY k.sale_date DESC LIMIT 1),
-                        s."AcSalesmanGroupID"
-                    ) as outlet_id
-                FROM "AcSalesman" s
-                WHERE s."AcSalesmanID" = $1
-                  AND s."Active" = 'Y'
-            """, user['code'])
-
             # Determine role and permissions
             is_supervisor = user['is_supervisor'] == 'Y'
             role = get_role_from_group(user['user_group'], is_supervisor)
             permissions = ROLE_PERMISSIONS.get(role, ROLE_PERMISSIONS['staff'])
 
+            # Get outlet access based on role
+            # Admin, OOM, Area Manager: Get from AcPersonalLocationAs (multiple outlets)
+            # PIC Outlet, Cashier: Get from AcSalesman.AcSalesmanGroupID (single outlet)
+            allowed_outlets = []
+            outlet_id = None
+            group_id = None
+
+            if role in ['admin', 'operations_manager', 'area_manager']:
+                # Get allowed outlets from AcPersonalLocationAs
+                outlet_rows = await conn.fetch("""
+                    SELECT pl."AcLocationID", l."AcLocationDesc"
+                    FROM "AcPersonalLocationAs" pl
+                    LEFT JOIN "AcLocation" l ON pl."AcLocationID" = l."AcLocationID"
+                    WHERE pl."Code" = $1 AND pl."IsActiveAtPOS" = 'Y'
+                    ORDER BY pl."AcLocationID"
+                """, user['code'])
+                allowed_outlets = [
+                    {'id': row['AcLocationID'], 'name': row['AcLocationDesc'] or row['AcLocationID']}
+                    for row in outlet_rows
+                ]
+                # Default outlet_id is None (means ALL outlets selected)
+                outlet_id = None
+                group_id = None
+            else:
+                # PIC Outlet, Cashier: Get from AcSalesman.AcSalesmanGroupID
+                staff_info = await conn.fetchrow("""
+                    SELECT s."AcSalesmanGroupID" as group_id
+                    FROM "AcSalesman" s
+                    WHERE s."AcSalesmanID" = $1 AND s."Active" = 'Y'
+                """, user['code'])
+                if staff_info and staff_info['group_id']:
+                    group_id = staff_info['group_id']
+                    outlet_id = group_id  # For cashier/PIC, outlet = group
+                    # Get outlet name
+                    outlet_info = await conn.fetchrow("""
+                        SELECT "AcLocationDesc" FROM "AcLocation" WHERE "AcLocationID" = $1
+                    """, group_id)
+                    allowed_outlets = [
+                        {'id': group_id, 'name': outlet_info['AcLocationDesc'] if outlet_info else group_id}
+                    ]
+
             # Generate session token
             token = secrets.token_urlsafe(32)
 
             # Store session (expires in 24 hours)
-            # outlet_id = physical location where sales are made (for summary)
-            # group_id = assigned team (for staff filtering)
             user_data = {
                 'code': user['code'],
                 'name': user['name'],
                 'role': role,
-                'outlet_id': staff_info['outlet_id'] if staff_info else None,
-                'group_id': staff_info['group_id'] if staff_info else None,
+                'outlet_id': outlet_id,
+                'group_id': group_id,
+                'allowed_outlets': allowed_outlets,
                 'is_supervisor': is_supervisor,
                 'user_group': user['user_group'],
                 'permissions': permissions
@@ -625,14 +650,16 @@ async def get_leaderboard(
 
 @app.get("/api/v1/kpi/team")
 async def get_team_overview(
-    outlet_id: str = Query(..., description="Physical outlet ID for summary"),
+    outlet_id: Optional[str] = Query(None, description="Physical outlet ID for summary (empty/ALL = all outlets)"),
     group_id: Optional[str] = Query(None, description="Staff group ID for filtering (defaults to outlet_id)"),
+    outlet_ids: Optional[str] = Query(None, description="Comma-separated outlet IDs for filtering (for Admin/OOM)"),
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None)
 ):
     """Get team overview - HYBRID: MV for history + real-time for today.
 
-    - outlet_id: Physical outlet where sales are made (for summary totals)
+    - outlet_id: Physical outlet where sales are made (for summary totals). Empty/ALL = aggregate all.
+    - outlet_ids: Comma-separated list of outlets to filter (for Admin/OOM viewing multiple outlets)
     - group_id: Staff team/group for filtering assigned staff (defaults to outlet_id)
     """
     if not start_date:
@@ -641,35 +668,76 @@ async def get_team_overview(
         end_date = date.today()
 
     today = date.today()
-    # Use timestamp range for index efficiency (avoid ::date cast which causes seq scan)
     today_start = datetime.combine(today, datetime.min.time())
     today_end = datetime.combine(today + timedelta(days=1), datetime.min.time())
+
+    # Determine if viewing ALL outlets or specific outlet
+    view_all = not outlet_id or outlet_id.upper() == 'ALL'
+    outlet_list = []
+    if outlet_ids:
+        outlet_list = [o.strip() for o in outlet_ids.split(',') if o.strip()]
+
     staff_group = group_id or outlet_id
 
     async with pool.acquire() as conn:
         # HYBRID: Get outlet summary from MV (excluding today) + real-time for today
-        # Step 1: Historical from MV
-        mv_summary = await conn.fetchrow("""
-            SELECT
-                COALESCE(SUM(transactions), 0) as transactions,
-                COALESCE(SUM(total_sales), 0) as total_sales,
-                COALESCE(SUM(gross_profit), 0) as gross_profit,
-                COALESCE(SUM(house_brand_sales), 0) as house_brand_sales,
-                COALESCE(SUM(focused_1_sales), 0) as focused_1_sales,
-                COALESCE(SUM(focused_2_sales), 0) as focused_2_sales,
-                COALESCE(SUM(focused_3_sales), 0) as focused_3_sales,
-                COALESCE(SUM(pwp_sales), 0) as pwp_sales,
-                COALESCE(SUM(clearance_sales), 0) as clearance_sales
-            FROM analytics.mv_outlet_daily_kpi
-            WHERE outlet_id = $1
-              AND sale_date BETWEEN $2 AND $3
-              AND sale_date < $4
-        """, outlet_id, start_date, end_date, today)
+        if view_all and outlet_list:
+            # Aggregate across specified outlets
+            mv_summary = await conn.fetchrow("""
+                SELECT
+                    COALESCE(SUM(transactions), 0) as transactions,
+                    COALESCE(SUM(total_sales), 0) as total_sales,
+                    COALESCE(SUM(gross_profit), 0) as gross_profit,
+                    COALESCE(SUM(house_brand_sales), 0) as house_brand_sales,
+                    COALESCE(SUM(focused_1_sales), 0) as focused_1_sales,
+                    COALESCE(SUM(focused_2_sales), 0) as focused_2_sales,
+                    COALESCE(SUM(focused_3_sales), 0) as focused_3_sales,
+                    COALESCE(SUM(pwp_sales), 0) as pwp_sales,
+                    COALESCE(SUM(clearance_sales), 0) as clearance_sales
+                FROM analytics.mv_outlet_daily_kpi
+                WHERE outlet_id = ANY($1)
+                  AND sale_date BETWEEN $2 AND $3
+                  AND sale_date < $4
+            """, outlet_list, start_date, end_date, today)
+        elif view_all:
+            # Aggregate across ALL outlets
+            mv_summary = await conn.fetchrow("""
+                SELECT
+                    COALESCE(SUM(transactions), 0) as transactions,
+                    COALESCE(SUM(total_sales), 0) as total_sales,
+                    COALESCE(SUM(gross_profit), 0) as gross_profit,
+                    COALESCE(SUM(house_brand_sales), 0) as house_brand_sales,
+                    COALESCE(SUM(focused_1_sales), 0) as focused_1_sales,
+                    COALESCE(SUM(focused_2_sales), 0) as focused_2_sales,
+                    COALESCE(SUM(focused_3_sales), 0) as focused_3_sales,
+                    COALESCE(SUM(pwp_sales), 0) as pwp_sales,
+                    COALESCE(SUM(clearance_sales), 0) as clearance_sales
+                FROM analytics.mv_outlet_daily_kpi
+                WHERE sale_date BETWEEN $1 AND $2
+                  AND sale_date < $3
+            """, start_date, end_date, today)
+        else:
+            # Single outlet
+            mv_summary = await conn.fetchrow("""
+                SELECT
+                    COALESCE(SUM(transactions), 0) as transactions,
+                    COALESCE(SUM(total_sales), 0) as total_sales,
+                    COALESCE(SUM(gross_profit), 0) as gross_profit,
+                    COALESCE(SUM(house_brand_sales), 0) as house_brand_sales,
+                    COALESCE(SUM(focused_1_sales), 0) as focused_1_sales,
+                    COALESCE(SUM(focused_2_sales), 0) as focused_2_sales,
+                    COALESCE(SUM(focused_3_sales), 0) as focused_3_sales,
+                    COALESCE(SUM(pwp_sales), 0) as pwp_sales,
+                    COALESCE(SUM(clearance_sales), 0) as clearance_sales
+                FROM analytics.mv_outlet_daily_kpi
+                WHERE outlet_id = $1
+                  AND sale_date BETWEEN $2 AND $3
+                  AND sale_date < $4
+            """, outlet_id, start_date, end_date, today)
 
-        # Step 2: Today's data from base tables (real-time)
-        # Use timestamp range for index efficiency (not ::date cast)
+        # Step 2: Today's data from base tables (real-time) - only for single outlet
         today_summary = None
-        if end_date >= today:
+        if not view_all and end_date >= today:
             today_summary = await conn.fetchrow("""
                 WITH combined AS (
                     SELECT d."ItemTotal" as amount, d."ItemCost" as cost, s."AcStockUDGroup1ID" as stock_group, m."DocumentNo" as doc
@@ -722,45 +790,51 @@ async def get_team_overview(
         }
 
         # Get outlet name
-        outlet_info = await conn.fetchrow("""
-            SELECT "AcLocationDesc" as outlet_name FROM "AcLocation" WHERE "AcLocationID" = $1
-        """, outlet_id)
+        outlet_name = "All Outlets" if view_all else None
+        if not view_all:
+            outlet_info = await conn.fetchrow("""
+                SELECT "AcLocationDesc" as outlet_name FROM "AcLocation" WHERE "AcLocationID" = $1
+            """, outlet_id)
+            outlet_name = outlet_info['outlet_name'] if outlet_info else outlet_id
 
-        # Staff performance from MV (fast) - no hybrid needed for individual staff breakdown
-        staff = await conn.fetch("""
-            SELECT
-                s."AcSalesmanID" as staff_id,
-                s."AcSalesmanName" as staff_name,
-                COALESCE(SUM(k.transactions), 0) as transactions,
-                COALESCE(SUM(k.total_sales), 0) as total_sales,
-                COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
-                COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
-                COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
-                COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
-                COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
-                COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
-                r.outlet_rank_sales as rank
-            FROM "AcSalesman" s
-            LEFT JOIN analytics.mv_staff_daily_kpi k
-                ON s."AcSalesmanID" = k.staff_id
-                AND k.outlet_id = $1
-                AND k.sale_date BETWEEN $2 AND $3
-            LEFT JOIN analytics.mv_staff_rankings r
-                ON s."AcSalesmanID" = r.staff_id
-                AND r.outlet_id = $1
-                AND r.month = DATE_TRUNC('month', $2::date)
-            WHERE s."AcSalesmanGroupID" = $4
-              AND s."Active" = 'Y'
-            GROUP BY s."AcSalesmanID", s."AcSalesmanName", r.outlet_rank_sales
-            ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
-        """, outlet_id, start_date, end_date, staff_group)
+        # Staff performance - only for single outlet with group_id
+        staff = []
+        if not view_all and staff_group:
+            staff = await conn.fetch("""
+                SELECT
+                    s."AcSalesmanID" as staff_id,
+                    s."AcSalesmanName" as staff_name,
+                    COALESCE(SUM(k.transactions), 0) as transactions,
+                    COALESCE(SUM(k.total_sales), 0) as total_sales,
+                    COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
+                    COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
+                    COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
+                    COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
+                    COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
+                    COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
+                    r.outlet_rank_sales as rank
+                FROM "AcSalesman" s
+                LEFT JOIN analytics.mv_staff_daily_kpi k
+                    ON s."AcSalesmanID" = k.staff_id
+                    AND k.outlet_id = $1
+                    AND k.sale_date BETWEEN $2 AND $3
+                LEFT JOIN analytics.mv_staff_rankings r
+                    ON s."AcSalesmanID" = r.staff_id
+                    AND r.outlet_id = $1
+                    AND r.month = DATE_TRUNC('month', $2::date)
+                WHERE s."AcSalesmanGroupID" = $4
+                  AND s."Active" = 'Y'
+                GROUP BY s."AcSalesmanID", s."AcSalesmanName", r.outlet_rank_sales
+                ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
+            """, outlet_id, start_date, end_date, staff_group)
 
         return {
             "success": True,
             "data": {
-                "outlet_id": outlet_id,
+                "outlet_id": outlet_id or "ALL",
                 "group_id": staff_group,
-                "outlet_name": outlet_info['outlet_name'] if outlet_info else outlet_id,
+                "outlet_name": outlet_name,
+                "view_all": view_all,
                 "period": {
                     "start": start_date.isoformat(),
                     "end": end_date.isoformat()
