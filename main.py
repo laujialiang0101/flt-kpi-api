@@ -1051,39 +1051,44 @@ async def get_my_commission(
     if not end_date:
         end_date = date.today()
 
+    # Use timestamp range for index efficiency
+    start_ts = datetime.combine(start_date, datetime.min.time())
+    end_ts = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+    today = date.today()
+    today_start = datetime.combine(today, datetime.min.time())
+    today_end = datetime.combine(today + timedelta(days=1), datetime.min.time())
+
     try:
         async with pool.acquire() as conn:
-            # Calculate commission from transactions
-            # Commission = ItemAmount * CommissionByPercentStockPrice1 / 100
+            # Calculate commission - filter by date first via AcCSM for index usage
             result = await conn.fetchrow("""
                 SELECT
-                    COUNT(DISTINCT d."DocumentNo") as transaction_count,
+                    COUNT(DISTINCT c."DocumentNo") as transaction_count,
                     SUM(d."ItemAmount") as total_sales,
                     SUM(d."ItemAmount" * COALESCE(s."CommissionByPercentStockPrice1", 0) / 100) as commission
-                FROM "AcCSD" d
-                JOIN "AcCSM" c ON d."DocumentNo" = c."DocumentNo"
+                FROM "AcCSM" c
+                INNER JOIN "AcCSD" d ON c."DocumentNo" = d."DocumentNo"
                 LEFT JOIN "AcStockCompany" s
                     ON d."AcStockID" = s."AcStockID"
                     AND d."AcStockUOMID" = s."AcStockUOMID"
-                WHERE d."AcSalesmanID" = $1
-                  AND c."DocumentDate" BETWEEN $2 AND $3
+                WHERE c."DocumentDate" >= $2 AND c."DocumentDate" < $3
+                  AND d."AcSalesmanID" = $1
                   AND d."ItemAmount" > 0
-            """, staff_id, start_date, end_date)
+            """, staff_id, start_ts, end_ts)
 
             # Get today's commission
-            today = date.today()
             today_result = await conn.fetchrow("""
                 SELECT
                     SUM(d."ItemAmount" * COALESCE(s."CommissionByPercentStockPrice1", 0) / 100) as commission
-                FROM "AcCSD" d
-                JOIN "AcCSM" c ON d."DocumentNo" = c."DocumentNo"
+                FROM "AcCSM" c
+                INNER JOIN "AcCSD" d ON c."DocumentNo" = d."DocumentNo"
                 LEFT JOIN "AcStockCompany" s
                     ON d."AcStockID" = s."AcStockID"
                     AND d."AcStockUOMID" = s."AcStockUOMID"
-                WHERE d."AcSalesmanID" = $1
-                  AND c."DocumentDate" = $2
+                WHERE c."DocumentDate" >= $2 AND c."DocumentDate" < $3
+                  AND d."AcSalesmanID" = $1
                   AND d."ItemAmount" > 0
-            """, staff_id, today)
+            """, staff_id, today_start, today_end)
 
             # Get commission breakdown by product category
             breakdown = await conn.fetch("""
@@ -1091,18 +1096,18 @@ async def get_my_commission(
                     COALESCE(s."AcStockUDGroup1ID", 'OTHER') as category,
                     SUM(d."ItemAmount") as sales,
                     SUM(d."ItemAmount" * COALESCE(s."CommissionByPercentStockPrice1", 0) / 100) as commission
-                FROM "AcCSD" d
-                JOIN "AcCSM" c ON d."DocumentNo" = c."DocumentNo"
+                FROM "AcCSM" c
+                INNER JOIN "AcCSD" d ON c."DocumentNo" = d."DocumentNo"
                 LEFT JOIN "AcStockCompany" s
                     ON d."AcStockID" = s."AcStockID"
                     AND d."AcStockUOMID" = s."AcStockUOMID"
-                WHERE d."AcSalesmanID" = $1
-                  AND c."DocumentDate" BETWEEN $2 AND $3
+                WHERE c."DocumentDate" >= $2 AND c."DocumentDate" < $3
+                  AND d."AcSalesmanID" = $1
                   AND d."ItemAmount" > 0
                 GROUP BY s."AcStockUDGroup1ID"
                 ORDER BY commission DESC
                 LIMIT 10
-            """, staff_id, start_date, end_date)
+            """, staff_id, start_ts, end_ts)
 
             return {
                 "success": True,
