@@ -1045,41 +1045,37 @@ async def get_my_commission(
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None)
 ):
-    """Calculate commission earned from actual sales."""
+    """Calculate commission - HYBRID: MV for history + real-time for today."""
     if not start_date:
         start_date = date.today().replace(day=1)
     if not end_date:
         end_date = date.today()
 
-    # Use timestamp range for index efficiency
-    start_ts = datetime.combine(start_date, datetime.min.time())
-    end_ts = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
     today = date.today()
     today_start = datetime.combine(today, datetime.min.time())
     today_end = datetime.combine(today + timedelta(days=1), datetime.min.time())
 
     try:
         async with pool.acquire() as conn:
-            # Calculate commission - filter by date first via AcCSM for index usage
-            result = await conn.fetchrow("""
+            # HYBRID: MV for history + real-time for today
+            # Step 1: Get historical commission from MV (fast)
+            mv_result = await conn.fetchrow("""
                 SELECT
-                    COUNT(DISTINCT c."DocumentNo") as transaction_count,
-                    SUM(d."ItemAmount") as total_sales,
-                    SUM(d."ItemAmount" * COALESCE(s."CommissionByPercentStockPrice1", 0) / 100) as commission
-                FROM "AcCSM" c
-                INNER JOIN "AcCSD" d ON c."DocumentNo" = d."DocumentNo"
-                LEFT JOIN "AcStockCompany" s
-                    ON d."AcStockID" = s."AcStockID"
-                    AND d."AcStockUOMID" = s."AcStockUOMID"
-                WHERE c."DocumentDate" >= $2 AND c."DocumentDate" < $3
-                  AND d."AcSalesmanID" = $1
-                  AND d."ItemAmount" > 0
-            """, staff_id, start_ts, end_ts)
+                    COALESCE(SUM(transactions), 0) as transaction_count,
+                    COALESCE(SUM(total_sales), 0) as total_sales,
+                    COALESCE(SUM(commission), 0) as commission
+                FROM analytics.mv_staff_daily_commission
+                WHERE staff_id = $1
+                  AND sale_date BETWEEN $2 AND $3
+                  AND sale_date < $4
+            """, staff_id, start_date, end_date, today)
 
-            # Get today's commission
+            # Step 2: Get today's commission from base tables (real-time)
             today_result = await conn.fetchrow("""
                 SELECT
-                    SUM(d."ItemAmount" * COALESCE(s."CommissionByPercentStockPrice1", 0) / 100) as commission
+                    COUNT(DISTINCT c."DocumentNo") as transaction_count,
+                    COALESCE(SUM(d."ItemAmount"), 0) as total_sales,
+                    COALESCE(SUM(d."ItemAmount" * COALESCE(s."CommissionByPercentStockPrice1", 0) / 100), 0) as commission
                 FROM "AcCSM" c
                 INNER JOIN "AcCSD" d ON c."DocumentNo" = d."DocumentNo"
                 LEFT JOIN "AcStockCompany" s
@@ -1090,24 +1086,22 @@ async def get_my_commission(
                   AND d."ItemAmount" > 0
             """, staff_id, today_start, today_end)
 
-            # Get commission breakdown by product category
+            # Combine MV + today
+            total_transactions = int(mv_result['transaction_count'] or 0) + int(today_result['transaction_count'] or 0)
+            total_sales = float(mv_result['total_sales'] or 0) + float(today_result['total_sales'] or 0)
+            total_commission = float(mv_result['commission'] or 0) + float(today_result['commission'] or 0)
+            today_commission = float(today_result['commission'] or 0)
+
+            # Get commission breakdown from MV (fast, doesn't need real-time)
             breakdown = await conn.fetch("""
                 SELECT
-                    COALESCE(s."AcStockUDGroup1ID", 'OTHER') as category,
-                    SUM(d."ItemAmount") as sales,
-                    SUM(d."ItemAmount" * COALESCE(s."CommissionByPercentStockPrice1", 0) / 100) as commission
-                FROM "AcCSM" c
-                INNER JOIN "AcCSD" d ON c."DocumentNo" = d."DocumentNo"
-                LEFT JOIN "AcStockCompany" s
-                    ON d."AcStockID" = s."AcStockID"
-                    AND d."AcStockUOMID" = s."AcStockUOMID"
-                WHERE c."DocumentDate" >= $2 AND c."DocumentDate" < $3
-                  AND d."AcSalesmanID" = $1
-                  AND d."ItemAmount" > 0
-                GROUP BY s."AcStockUDGroup1ID"
-                ORDER BY commission DESC
-                LIMIT 10
-            """, staff_id, start_ts, end_ts)
+                    'COMBINED' as category,
+                    SUM(total_sales) as sales,
+                    SUM(commission) as commission
+                FROM analytics.mv_staff_daily_commission
+                WHERE staff_id = $1
+                  AND sale_date BETWEEN $2 AND $3
+            """, staff_id, start_date, end_date)
 
             return {
                 "success": True,
@@ -1117,12 +1111,12 @@ async def get_my_commission(
                         "end": end_date.isoformat()
                     },
                     "summary": {
-                        "total_sales": float(result['total_sales'] or 0),
-                        "commission_earned": float(result['commission'] or 0),
-                        "transaction_count": int(result['transaction_count'] or 0)
+                        "total_sales": round(total_sales, 2),
+                        "commission_earned": round(total_commission, 2),
+                        "transaction_count": total_transactions
                     },
                     "today": {
-                        "commission_earned": float(today_result['commission'] or 0) if today_result else 0
+                        "commission_earned": round(today_commission, 2)
                     },
                     "breakdown": [
                         {
@@ -1357,7 +1351,8 @@ async def refresh_materialized_views(
             views = [
                 'analytics.mv_staff_daily_kpi',
                 'analytics.mv_outlet_daily_kpi',
-                'analytics.mv_staff_rankings'
+                'analytics.mv_staff_rankings',
+                'analytics.mv_staff_daily_commission'
             ]
 
             for view in views:
