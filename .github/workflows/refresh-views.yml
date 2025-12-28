@@ -1,0 +1,31 @@
+name: Refresh Materialized Views
+
+on:
+  schedule:
+    # Every 30 minutes during business hours (8am-10pm Malaysia Time = 0am-2pm UTC)
+    # Note: GitHub Actions uses UTC timezone
+    - cron: '*/30 0-14 * * *'
+    # Final refresh at 11pm Malaysia Time (3pm UTC)
+    - cron: '0 15 * * *'
+  # Allow manual trigger
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refresh Materialized Views
+        run: |
+          echo "Triggering MV refresh at $(date)"
+          response=$(curl -s -X POST "https://flt-kpi-api.onrender.com/api/v1/admin/refresh-views?api_key=${{ secrets.REFRESH_API_KEY }}")
+          echo "Response: $response"
+
+          # Check if refresh was successful
+          if echo "$response" | grep -q '"success":true'; then
+            echo "Refresh completed successfully!"
+          else
+            echo "Refresh may have failed. Check API logs."
+            exit 1
+          fi
+        env:
+          REFRESH_API_KEY: ${{ secrets.REFRESH_API_KEY }}
