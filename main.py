@@ -1730,6 +1730,256 @@ async def send_test_notification(
 
 
 # ============================================================================
+# Scheduled Daily Notifications (for cron jobs)
+# ============================================================================
+
+# Gen Z friendly motivational messages - short, affirming, with emojis
+MORNING_MOTIVATIONS = [
+    "Let's crush it today! 💪",
+    "You've got this bestie! ✨",
+    "Time to slay! 🔥",
+    "Main character energy today! 🌟",
+    "Your goals are loading... 📈",
+    "New day, new wins! 🎯",
+    "Serving excellence today! 💅",
+    "Era of success starts now! 🚀",
+]
+
+EVENING_MOTIVATIONS_GOOD = [
+    "You ate today! 🔥",
+    "Slayed! Tomorrow we go again! 💅",
+    "W performance! Keep vibing! ✨",
+    "That's the energy we need! 🌟",
+    "Legend status achieved! 🏆",
+    "No cap, you killed it! 💪",
+]
+
+EVENING_MOTIVATIONS_NEEDS_PUSH = [
+    "Tomorrow is your redemption arc! 💪",
+    "Rest up, comeback loading... 🔄",
+    "We move! Try again tomorrow! ✨",
+    "It's giving 'work in progress' 📈",
+    "Not the end, just a plot twist! 🎬",
+    "Glow up starts tomorrow! 🌅",
+]
+
+@app.post("/api/v1/push/morning-briefing")
+async def send_morning_briefing(
+    api_key: str = Query(..., description="API key for authentication")
+):
+    """Send 8am morning briefing to all subscribed staff.
+
+    Schedule with external cron: 0 8 * * * (daily at 8am)
+
+    Message includes:
+    - Gap against monthly target
+    - Daily target to stay on track
+    - Gen Z motivational message
+    """
+    expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
+    if api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    if not PUSH_AVAILABLE:
+        return {"success": False, "error": "Push notifications not available"}
+
+    today = date.today()
+    year_month = int(today.strftime('%Y%m'))
+    days_in_month = (date(today.year, today.month + 1 if today.month < 12 else 1, 1) - timedelta(days=1)).day if today.month < 12 else 31
+    days_remaining = days_in_month - today.day + 1
+
+    sent_count = 0
+    errors = []
+
+    try:
+        async with pool.acquire() as conn:
+            # Get all subscribed staff with their targets and MTD performance
+            staff_data = await conn.fetch("""
+                WITH subscribed_staff AS (
+                    SELECT DISTINCT staff_id
+                    FROM kpi.push_subscriptions
+                ),
+                mtd_sales AS (
+                    SELECT
+                        staff_id,
+                        SUM(total_sales) as mtd_total,
+                        SUM(house_brand_sales) as mtd_house_brand
+                    FROM analytics.mv_staff_daily_kpi
+                    WHERE EXTRACT(YEAR FROM sale_date) = $1
+                      AND EXTRACT(MONTH FROM sale_date) = $2
+                    GROUP BY staff_id
+                )
+                SELECT
+                    s.staff_id,
+                    COALESCE(m.mtd_total, 0) as mtd_total,
+                    COALESCE(m.mtd_house_brand, 0) as mtd_house_brand,
+                    COALESCE(t.total_sales_target, 0) as target_total,
+                    COALESCE(t.house_brand_target, 0) as target_house_brand
+                FROM subscribed_staff s
+                LEFT JOIN mtd_sales m ON s.staff_id = m.staff_id
+                LEFT JOIN "KPITargets" t ON s.staff_id = t.salesman_id AND t.year_month = $3
+            """, today.year, today.month, year_month)
+
+            motivation = random.choice(MORNING_MOTIVATIONS)
+
+            for staff in staff_data:
+                mtd = float(staff['mtd_total'] or 0)
+                target = float(staff['target_total'] or 0)
+
+                if target > 0:
+                    gap = target - mtd
+                    daily_needed = gap / days_remaining if days_remaining > 0 else gap
+                    progress_pct = (mtd / target) * 100
+
+                    if gap <= 0:
+                        title = "🎯 You're ahead of target!"
+                        msg = f"MTD: RM{mtd:,.0f} | Already hit RM{target:,.0f}! {motivation}"
+                    else:
+                        title = "☀️ Good morning!"
+                        msg = f"Gap: RM{gap:,.0f} | Need RM{daily_needed:,.0f}/day | {days_remaining} days left. {motivation}"
+                else:
+                    title = "☀️ Rise and grind!"
+                    msg = f"MTD: RM{mtd:,.0f} | No target set yet. {motivation}"
+
+                try:
+                    await send_push_to_staff(
+                        staff_id=staff['staff_id'],
+                        title=title,
+                        message=msg,
+                        data={"type": "morning_briefing", "mtd": mtd, "target": target}
+                    )
+                    sent_count += 1
+                except Exception as e:
+                    errors.append(f"{staff['staff_id']}: {str(e)}")
+
+        return {
+            "success": True,
+            "sent_count": sent_count,
+            "errors": errors[:10] if errors else [],
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Morning briefing failed: {str(e)}")
+
+
+@app.post("/api/v1/push/evening-recap")
+async def send_evening_recap(
+    api_key: str = Query(..., description="API key for authentication")
+):
+    """Send 10:30pm evening recap to all subscribed staff.
+
+    Schedule with external cron: 30 22 * * * (daily at 10:30pm)
+
+    Message includes:
+    - Today's performance
+    - Gap against monthly target
+    - Motivational message based on performance
+    """
+    expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
+    if api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    if not PUSH_AVAILABLE:
+        return {"success": False, "error": "Push notifications not available"}
+
+    today = date.today()
+    year_month = int(today.strftime('%Y%m'))
+    days_in_month = (date(today.year, today.month + 1 if today.month < 12 else 1, 1) - timedelta(days=1)).day if today.month < 12 else 31
+    expected_progress = (today.day / days_in_month) * 100
+
+    sent_count = 0
+    errors = []
+
+    try:
+        async with pool.acquire() as conn:
+            # Get all subscribed staff with today's and MTD performance
+            staff_data = await conn.fetch("""
+                WITH subscribed_staff AS (
+                    SELECT DISTINCT staff_id
+                    FROM kpi.push_subscriptions
+                ),
+                today_sales AS (
+                    SELECT
+                        staff_id,
+                        SUM(total_sales) as today_total,
+                        SUM(transactions) as today_trans
+                    FROM analytics.mv_staff_daily_kpi
+                    WHERE sale_date = $1
+                    GROUP BY staff_id
+                ),
+                mtd_sales AS (
+                    SELECT
+                        staff_id,
+                        SUM(total_sales) as mtd_total
+                    FROM analytics.mv_staff_daily_kpi
+                    WHERE EXTRACT(YEAR FROM sale_date) = $2
+                      AND EXTRACT(MONTH FROM sale_date) = $3
+                    GROUP BY staff_id
+                )
+                SELECT
+                    s.staff_id,
+                    COALESCE(d.today_total, 0) as today_total,
+                    COALESCE(d.today_trans, 0) as today_trans,
+                    COALESCE(m.mtd_total, 0) as mtd_total,
+                    COALESCE(t.total_sales_target, 0) as target_total
+                FROM subscribed_staff s
+                LEFT JOIN today_sales d ON s.staff_id = d.staff_id
+                LEFT JOIN mtd_sales m ON s.staff_id = m.staff_id
+                LEFT JOIN "KPITargets" t ON s.staff_id = t.salesman_id AND t.year_month = $4
+            """, today, today.year, today.month, year_month)
+
+            for staff in staff_data:
+                today_sales = float(staff['today_total'] or 0)
+                today_trans = int(staff['today_trans'] or 0)
+                mtd = float(staff['mtd_total'] or 0)
+                target = float(staff['target_total'] or 0)
+
+                if target > 0:
+                    progress_pct = (mtd / target) * 100
+                    gap = target - mtd
+
+                    # Good performance = ahead or on track
+                    is_good = progress_pct >= expected_progress * 0.9  # Within 10% of expected
+                    motivation = random.choice(EVENING_MOTIVATIONS_GOOD if is_good else EVENING_MOTIVATIONS_NEEDS_PUSH)
+
+                    if progress_pct >= 100:
+                        title = "🏆 Target achieved!"
+                        msg = f"Today: RM{today_sales:,.0f} | MTD: RM{mtd:,.0f}/{target:,.0f} ({progress_pct:.0f}%). {motivation}"
+                    elif is_good:
+                        title = "🌙 Great day!"
+                        msg = f"Today: RM{today_sales:,.0f} | Gap: RM{gap:,.0f} | {progress_pct:.0f}% done. {motivation}"
+                    else:
+                        title = "🌙 Day's done!"
+                        msg = f"Today: RM{today_sales:,.0f} | Gap: RM{gap:,.0f} | {progress_pct:.0f}% done. {motivation}"
+                else:
+                    motivation = random.choice(EVENING_MOTIVATIONS_GOOD if today_sales > 500 else EVENING_MOTIVATIONS_NEEDS_PUSH)
+                    title = "🌙 That's a wrap!"
+                    msg = f"Today: RM{today_sales:,.0f} | {today_trans} transactions. {motivation}"
+
+                try:
+                    await send_push_to_staff(
+                        staff_id=staff['staff_id'],
+                        title=title,
+                        message=msg,
+                        data={"type": "evening_recap", "today": today_sales, "mtd": mtd, "target": target}
+                    )
+                    sent_count += 1
+                except Exception as e:
+                    errors.append(f"{staff['staff_id']}: {str(e)}")
+
+        return {
+            "success": True,
+            "sent_count": sent_count,
+            "errors": errors[:10] if errors else [],
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Evening recap failed: {str(e)}")
+
+
+# ============================================================================
 # Debug Endpoints
 # ============================================================================
 
