@@ -805,59 +805,102 @@ async def get_team_overview(
                   AND sale_date < $4
             """, outlet_id, start_date, end_date, today)
 
-        # Step 2: Today's data from base tables (real-time) - only for single outlet
+        # Step 2: Today's data from base tables (real-time)
         # Note: asyncpg doesn't support parallel queries on single connection, run sequentially
         # Requires indexes: idx_accsm_location_date, idx_accusinvoicem_location_date
         today_summary = None
-        if not view_all and end_date >= today:
-            # Query 1: Cash sales summary (uses idx_accsm_location_date)
-            cash_result = await conn.fetchrow("""
-                SELECT
-                    COUNT(DISTINCT m."DocumentNo") as transactions,
-                    COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
-                    COALESCE(SUM(d."ItemTotal" - COALESCE(d."ItemCost" * d."ItemQuantity", 0)), 0) as gross_profit,
-                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
-                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
-                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
-                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
-                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
-                FROM "AcCSM" m
-                INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
-                LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
-                WHERE m."AcLocationID" = $1
-                  AND m."DocumentDate" >= $2
-                  AND m."DocumentDate" < $3
-            """, outlet_id, today_start, today_end)
+        if end_date >= today:
+            if view_all:
+                # All outlets - no location filter
+                cash_result = await conn.fetchrow("""
+                    SELECT
+                        COUNT(DISTINCT m."DocumentNo") as transactions,
+                        COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
+                        COALESCE(SUM(d."ItemTotal" - COALESCE(d."ItemCost" * d."ItemQuantity", 0)), 0) as gross_profit,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                    FROM "AcCSM" m
+                    INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
+                    LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                    WHERE m."DocumentDate" >= $1
+                      AND m."DocumentDate" < $2
+                """, today_start, today_end)
 
-            # Query 2: Invoice sales summary (uses idx_accusinvoicem_location_date)
-            invoice_result = await conn.fetchrow("""
-                SELECT
-                    COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
-                    COALESCE(SUM(d."ItemTotalPrice"), 0) as total_sales,
-                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand_sales,
-                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
-                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
-                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
-                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales
-                FROM "AcCusInvoiceM" m
-                INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
-                LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
-                WHERE m."AcLocationID" = $1
-                  AND m."DocumentDate" >= $2
-                  AND m."DocumentDate" < $3
-            """, outlet_id, today_start, today_end)
+                invoice_result = await conn.fetchrow("""
+                    SELECT
+                        COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
+                        COALESCE(SUM(d."ItemTotalPrice"), 0) as total_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales
+                    FROM "AcCusInvoiceM" m
+                    INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
+                    LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                    WHERE m."DocumentDate" >= $1
+                      AND m."DocumentDate" < $2
+                """, today_start, today_end)
 
-            # Query 3: PWP sales (uses idx_accsdpromotiontype_promotion)
-            pwp_result = await conn.fetchrow("""
-                SELECT COALESCE(SUM(d."ItemTotal"), 0) as pwp_sales
-                FROM "AcCSD" d
-                INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
-                INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
-                WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
-                  AND m."AcLocationID" = $1
-                  AND m."DocumentDate" >= $2
-                  AND m."DocumentDate" < $3
-            """, outlet_id, today_start, today_end)
+                pwp_result = await conn.fetchrow("""
+                    SELECT COALESCE(SUM(d."ItemTotal"), 0) as pwp_sales
+                    FROM "AcCSD" d
+                    INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                    INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
+                    WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
+                      AND m."DocumentDate" >= $1
+                      AND m."DocumentDate" < $2
+                """, today_start, today_end)
+            else:
+                # Single outlet - filter by location
+                cash_result = await conn.fetchrow("""
+                    SELECT
+                        COUNT(DISTINCT m."DocumentNo") as transactions,
+                        COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
+                        COALESCE(SUM(d."ItemTotal" - COALESCE(d."ItemCost" * d."ItemQuantity", 0)), 0) as gross_profit,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                    FROM "AcCSM" m
+                    INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
+                    LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                    WHERE m."AcLocationID" = $1
+                      AND m."DocumentDate" >= $2
+                      AND m."DocumentDate" < $3
+                """, outlet_id, today_start, today_end)
+
+                invoice_result = await conn.fetchrow("""
+                    SELECT
+                        COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
+                        COALESCE(SUM(d."ItemTotalPrice"), 0) as total_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales
+                    FROM "AcCusInvoiceM" m
+                    INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
+                    LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                    WHERE m."AcLocationID" = $1
+                      AND m."DocumentDate" >= $2
+                      AND m."DocumentDate" < $3
+                """, outlet_id, today_start, today_end)
+
+                pwp_result = await conn.fetchrow("""
+                    SELECT COALESCE(SUM(d."ItemTotal"), 0) as pwp_sales
+                    FROM "AcCSD" d
+                    INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                    INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
+                    WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
+                      AND m."AcLocationID" = $1
+                      AND m."DocumentDate" >= $2
+                      AND m."DocumentDate" < $3
+                """, outlet_id, today_start, today_end)
 
             # Combine results
             today_summary = {
