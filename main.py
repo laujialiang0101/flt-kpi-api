@@ -806,12 +806,12 @@ async def get_team_overview(
             """, outlet_id, start_date, end_date, today)
 
         # Step 2: Today's data from base tables (real-time) - only for single outlet
-        # OPTIMIZED: Run separate simpler queries instead of complex CTE
+        # Note: asyncpg doesn't support parallel queries on single connection, run sequentially
         # Requires indexes: idx_accsm_location_date, idx_accusinvoicem_location_date
         today_summary = None
         if not view_all and end_date >= today:
             # Query 1: Cash sales summary (uses idx_accsm_location_date)
-            cash_query = conn.fetchrow("""
+            cash_result = await conn.fetchrow("""
                 SELECT
                     COUNT(DISTINCT m."DocumentNo") as transactions,
                     COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
@@ -830,7 +830,7 @@ async def get_team_overview(
             """, outlet_id, today_start, today_end)
 
             # Query 2: Invoice sales summary (uses idx_accusinvoicem_location_date)
-            invoice_query = conn.fetchrow("""
+            invoice_result = await conn.fetchrow("""
                 SELECT
                     COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
                     COALESCE(SUM(d."ItemTotalPrice"), 0) as total_sales,
@@ -848,7 +848,7 @@ async def get_team_overview(
             """, outlet_id, today_start, today_end)
 
             # Query 3: PWP sales (uses idx_accsdpromotiontype_promotion)
-            pwp_query = conn.fetchrow("""
+            pwp_result = await conn.fetchrow("""
                 SELECT COALESCE(SUM(d."ItemTotal"), 0) as pwp_sales
                 FROM "AcCSD" d
                 INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
@@ -858,11 +858,6 @@ async def get_team_overview(
                   AND m."DocumentDate" >= $2
                   AND m."DocumentDate" < $3
             """, outlet_id, today_start, today_end)
-
-            # Run all three queries in parallel
-            cash_result, invoice_result, pwp_result = await asyncio.gather(
-                cash_query, invoice_query, pwp_query
-            )
 
             # Combine results
             today_summary = {
