@@ -940,9 +940,65 @@ async def get_team_overview(
             """, outlet_id)
             outlet_name = outlet_info['outlet_name'] if outlet_info else outlet_id
 
-        # Staff performance - only for single outlet with group_id
+        # Staff performance
         staff = []
-        if not view_all and staff_group:
+        if view_all:
+            # All outlets - show top performers across all allowed outlets (or all if no filter)
+            if outlet_list:
+                # Filter by allowed outlets
+                staff = await conn.fetch("""
+                    SELECT
+                        k.staff_id,
+                        s."AcSalesmanName" as staff_name,
+                        s."AcSalesmanGroupID" as outlet_id,
+                        COALESCE(SUM(k.transactions), 0) as transactions,
+                        COALESCE(SUM(k.total_sales), 0) as total_sales,
+                        COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
+                        COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
+                        COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
+                        COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
+                        COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
+                        COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
+                        r.company_rank_sales as rank
+                    FROM analytics.mv_staff_daily_kpi k
+                    LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
+                    LEFT JOIN analytics.mv_staff_rankings r
+                        ON k.staff_id = r.staff_id
+                        AND r.month = DATE_TRUNC('month', $1::date)
+                        AND r.outlet_id = k.outlet_id
+                    WHERE k.sale_date BETWEEN $1 AND $2
+                      AND k.outlet_id = ANY($3)
+                    GROUP BY k.staff_id, s."AcSalesmanName", s."AcSalesmanGroupID", r.company_rank_sales
+                    ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
+                """, start_date, end_date, outlet_list)
+            else:
+                # No filter - show all staff
+                staff = await conn.fetch("""
+                    SELECT
+                        k.staff_id,
+                        s."AcSalesmanName" as staff_name,
+                        s."AcSalesmanGroupID" as outlet_id,
+                        COALESCE(SUM(k.transactions), 0) as transactions,
+                        COALESCE(SUM(k.total_sales), 0) as total_sales,
+                        COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
+                        COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
+                        COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
+                        COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
+                        COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
+                        COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
+                        r.company_rank_sales as rank
+                    FROM analytics.mv_staff_daily_kpi k
+                    LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
+                    LEFT JOIN analytics.mv_staff_rankings r
+                        ON k.staff_id = r.staff_id
+                        AND r.month = DATE_TRUNC('month', $1::date)
+                        AND r.outlet_id = k.outlet_id
+                    WHERE k.sale_date BETWEEN $1 AND $2
+                    GROUP BY k.staff_id, s."AcSalesmanName", s."AcSalesmanGroupID", r.company_rank_sales
+                    ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
+                """, start_date, end_date)
+        elif staff_group:
+            # Single outlet with staff group
             staff = await conn.fetch("""
                 SELECT
                     s."AcSalesmanID" as staff_id,
@@ -998,6 +1054,7 @@ async def get_team_overview(
                     {
                         "staff_id": row['staff_id'],
                         "staff_name": row['staff_name'] or "Unknown",
+                        "outlet_id": row.get('outlet_id') if view_all else None,  # Show outlet for all-outlets view
                         "total_sales": float(row['total_sales'] or 0),
                         "house_brand": float(row['house_brand_sales'] or 0),
                         "focused_1": float(row['focused_1_sales'] or 0),
@@ -1012,6 +1069,213 @@ async def get_team_overview(
                 ]
             }
         }
+
+
+@app.get("/api/v1/kpi/team/export")
+async def export_team_performance(
+    outlet_id: Optional[str] = Query(None, description="Outlet ID or 'ALL' for all outlets"),
+    outlet_ids: Optional[str] = Query(None, description="Comma-separated list of allowed outlet IDs"),
+    start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End date YYYY-MM-DD")
+):
+    """Export staff performance to Excel file.
+
+    For Admin/OOM: Can export all outlets or specific outlet
+    Returns Excel file with all staff KPI data
+    """
+    if not EXCEL_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Excel export not available - openpyxl not installed")
+
+    # Parse dates
+    today = date.today()
+    if start_date:
+        try:
+            start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        except:
+            start = date(today.year, today.month, 1)
+    else:
+        start = date(today.year, today.month, 1)
+
+    if end_date:
+        try:
+            end = datetime.strptime(end_date, "%Y-%m-%d").date()
+        except:
+            end = today
+    else:
+        end = today
+
+    view_all = not outlet_id or outlet_id.upper() == 'ALL'
+    outlet_list = [o.strip() for o in outlet_ids.split(',')] if outlet_ids else None
+
+    try:
+        async with pool.acquire() as conn:
+            if view_all:
+                if outlet_list:
+                    staff = await conn.fetch("""
+                        SELECT
+                            k.staff_id,
+                            s."AcSalesmanName" as staff_name,
+                            s."AcSalesmanGroupID" as outlet_id,
+                            l."AcLocationDesc" as outlet_name,
+                            COALESCE(SUM(k.transactions), 0) as transactions,
+                            COALESCE(SUM(k.total_sales), 0) as total_sales,
+                            COALESCE(SUM(k.gross_profit), 0) as gross_profit,
+                            COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
+                            COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
+                            COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
+                            COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
+                            COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
+                            COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
+                            r.company_rank_sales as rank
+                        FROM analytics.mv_staff_daily_kpi k
+                        LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
+                        LEFT JOIN "AcLocation" l ON s."AcSalesmanGroupID" = l."AcLocationID"
+                        LEFT JOIN analytics.mv_staff_rankings r
+                            ON k.staff_id = r.staff_id
+                            AND r.month = DATE_TRUNC('month', $1::date)
+                            AND r.outlet_id = k.outlet_id
+                        WHERE k.sale_date BETWEEN $1 AND $2
+                          AND k.outlet_id = ANY($3)
+                        GROUP BY k.staff_id, s."AcSalesmanName", s."AcSalesmanGroupID", l."AcLocationDesc", r.company_rank_sales
+                        ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
+                    """, start, end, outlet_list)
+                else:
+                    staff = await conn.fetch("""
+                        SELECT
+                            k.staff_id,
+                            s."AcSalesmanName" as staff_name,
+                            s."AcSalesmanGroupID" as outlet_id,
+                            l."AcLocationDesc" as outlet_name,
+                            COALESCE(SUM(k.transactions), 0) as transactions,
+                            COALESCE(SUM(k.total_sales), 0) as total_sales,
+                            COALESCE(SUM(k.gross_profit), 0) as gross_profit,
+                            COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
+                            COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
+                            COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
+                            COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
+                            COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
+                            COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
+                            r.company_rank_sales as rank
+                        FROM analytics.mv_staff_daily_kpi k
+                        LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
+                        LEFT JOIN "AcLocation" l ON s."AcSalesmanGroupID" = l."AcLocationID"
+                        LEFT JOIN analytics.mv_staff_rankings r
+                            ON k.staff_id = r.staff_id
+                            AND r.month = DATE_TRUNC('month', $1::date)
+                            AND r.outlet_id = k.outlet_id
+                        WHERE k.sale_date BETWEEN $1 AND $2
+                        GROUP BY k.staff_id, s."AcSalesmanName", s."AcSalesmanGroupID", l."AcLocationDesc", r.company_rank_sales
+                        ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
+                    """, start, end)
+            else:
+                # Single outlet
+                staff = await conn.fetch("""
+                    SELECT
+                        k.staff_id,
+                        s."AcSalesmanName" as staff_name,
+                        $1 as outlet_id,
+                        l."AcLocationDesc" as outlet_name,
+                        COALESCE(SUM(k.transactions), 0) as transactions,
+                        COALESCE(SUM(k.total_sales), 0) as total_sales,
+                        COALESCE(SUM(k.gross_profit), 0) as gross_profit,
+                        COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
+                        COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
+                        COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
+                        COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
+                        COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
+                        COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
+                        r.outlet_rank_sales as rank
+                    FROM analytics.mv_staff_daily_kpi k
+                    LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
+                    LEFT JOIN "AcLocation" l ON $1 = l."AcLocationID"
+                    LEFT JOIN analytics.mv_staff_rankings r
+                        ON k.staff_id = r.staff_id
+                        AND r.outlet_id = $1
+                        AND r.month = DATE_TRUNC('month', $2::date)
+                    WHERE k.sale_date BETWEEN $2 AND $3
+                      AND k.outlet_id = $1
+                    GROUP BY k.staff_id, s."AcSalesmanName", l."AcLocationDesc", r.outlet_rank_sales
+                    ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
+                """, outlet_id, start, end)
+
+        # Create Excel workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Staff Performance"
+
+        # Headers
+        headers = [
+            "Rank", "Staff ID", "Staff Name", "Outlet ID", "Outlet Name",
+            "Total Sales (RM)", "Gross Profit (RM)", "House Brand (RM)",
+            "Focused Item 1 (RM)", "Focused Item 2 (RM)", "Focused Item 3 (RM)",
+            "PWP (RM)", "Stock Clearance (RM)", "Transactions"
+        ]
+        ws.append(headers)
+
+        # Style headers
+        from openpyxl.styles import Font, PatternFill, Alignment
+        header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        for col, cell in enumerate(ws[1], 1):
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        # Data rows
+        for row in staff:
+            ws.append([
+                row['rank'] or "-",
+                row['staff_id'],
+                row['staff_name'] or "Unknown",
+                row['outlet_id'] or "-",
+                row['outlet_name'] or "-",
+                round(float(row['total_sales'] or 0), 2),
+                round(float(row['gross_profit'] or 0), 2),
+                round(float(row['house_brand_sales'] or 0), 2),
+                round(float(row['focused_1_sales'] or 0), 2),
+                round(float(row['focused_2_sales'] or 0), 2),
+                round(float(row['focused_3_sales'] or 0), 2),
+                round(float(row['pwp_sales'] or 0), 2),
+                round(float(row['clearance_sales'] or 0), 2),
+                int(row['transactions'] or 0)
+            ])
+
+        # Auto-adjust column widths
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 30)
+            ws.column_dimensions[column_letter].width = adjusted_width
+
+        # Format number columns
+        from openpyxl.styles.numbers import FORMAT_NUMBER_COMMA_SEPARATED1
+        for row in ws.iter_rows(min_row=2, min_col=6, max_col=13):
+            for cell in row:
+                cell.number_format = '#,##0.00'
+
+        # Save to buffer
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        # Generate filename
+        outlet_label = "all_outlets" if view_all else outlet_id
+        filename = f"staff_performance_{outlet_label}_{start.strftime('%Y%m%d')}_{end.strftime('%Y%m%d')}.xlsx"
+
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
 
 # ============================================================================
