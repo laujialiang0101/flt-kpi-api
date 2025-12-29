@@ -4,3 +4,4 @@ asyncpg==0.30.0
 python-multipart==0.0.19
 openpyxl==3.1.2
 pydantic==2.10.3
+pywebpush==1.14.1

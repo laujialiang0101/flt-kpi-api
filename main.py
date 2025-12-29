@@ -11,10 +11,12 @@ from datetime import date, datetime, timedelta
 from typing import Optional, List
 from pydantic import BaseModel
 import asyncpg
+import asyncio
 import os
 import io
 import secrets
 import json
+import random
 
 # Optional imports for Excel handling
 try:
@@ -23,6 +25,20 @@ try:
     EXCEL_AVAILABLE = True
 except ImportError:
     EXCEL_AVAILABLE = False
+
+# Optional imports for Push Notifications
+try:
+    from pywebpush import webpush, WebPushException
+    PUSH_AVAILABLE = True
+except ImportError:
+    PUSH_AVAILABLE = False
+    print("Warning: pywebpush not installed. Push notifications disabled.")
+
+# VAPID Configuration for Web Push
+# Generate new keys: python -c "from pywebpush import generate_vapid_keys; keys=generate_vapid_keys(); print(keys)"
+VAPID_PRIVATE_KEY = os.getenv('VAPID_PRIVATE_KEY', 'Yt3wLOw0I2VT0pr-7abhp9MqklTv2dUef9bIRiFcGQY')
+VAPID_PUBLIC_KEY = os.getenv('VAPID_PUBLIC_KEY', 'BNEaN-5grwfKBkK2JPQCCFnLIgW8CSUs0LU2dI5rGlJGzauTBinEfYnf0wOLKTmIqgBnfN1N9W7F1dq_7K-5hHc')
+VAPID_CLAIMS = {"sub": "mailto:admin@farmasilautan.com"}
 
 
 # ============================================================================
@@ -253,6 +269,7 @@ async def login(request: LoginRequest):
                 group_id = None
             else:
                 # PIC Outlet, Cashier: Get from AcSalesman.AcSalesmanGroupID
+                # Note: AcSalesmanGroupID may differ from AcLocationID (e.g., BG group → HQ location)
                 staff_info = await conn.fetchrow("""
                     SELECT s."AcSalesmanGroupID" as group_id
                     FROM "AcSalesman" s
@@ -260,14 +277,44 @@ async def login(request: LoginRequest):
                 """, user['code'])
                 if staff_info and staff_info['group_id']:
                     group_id = staff_info['group_id']
-                    outlet_id = group_id  # For cashier/PIC, outlet = group
-                    # Get outlet name
-                    outlet_info = await conn.fetchrow("""
-                        SELECT "AcLocationDesc" FROM "AcLocation" WHERE "AcLocationID" = $1
+
+                    # Check if group_id exists as a valid AcLocationID
+                    location_check = await conn.fetchrow("""
+                        SELECT "AcLocationID", "AcLocationDesc"
+                        FROM "AcLocation"
+                        WHERE "AcLocationID" = $1
                     """, group_id)
-                    allowed_outlets = [
-                        {'id': group_id, 'name': outlet_info['AcLocationDesc'] if outlet_info else group_id}
-                    ]
+
+                    if location_check:
+                        # Group ID is a valid location ID
+                        outlet_id = group_id
+                        allowed_outlets = [
+                            {'id': outlet_id, 'name': location_check['AcLocationDesc'] or outlet_id}
+                        ]
+                    else:
+                        # Group ID doesn't match location - find actual outlet from sales data
+                        actual_outlet = await conn.fetchrow("""
+                            SELECT DISTINCT outlet_id
+                            FROM analytics.mv_staff_daily_kpi
+                            WHERE staff_id = $1
+                            LIMIT 1
+                        """, user['code'])
+
+                        if actual_outlet and actual_outlet['outlet_id']:
+                            outlet_id = actual_outlet['outlet_id']
+                            # Get outlet name
+                            outlet_info = await conn.fetchrow("""
+                                SELECT "AcLocationDesc" FROM "AcLocation" WHERE "AcLocationID" = $1
+                            """, outlet_id)
+                            allowed_outlets = [
+                                {'id': outlet_id, 'name': outlet_info['AcLocationDesc'] if outlet_info else outlet_id}
+                            ]
+                        else:
+                            # No sales data - use group_id as fallback (staff may be new)
+                            outlet_id = group_id
+                            allowed_outlets = [
+                                {'id': group_id, 'name': group_id}
+                            ]
 
             # Generate session token
             token = secrets.token_urlsafe(32)
@@ -680,6 +727,27 @@ async def get_team_overview(
     staff_group = group_id or outlet_id
 
     async with pool.acquire() as conn:
+        # If no group_id provided, try to find corresponding group for the outlet
+        # This handles cases like HQ (location) → BG (group)
+        if not group_id and outlet_id and not view_all:
+            # Check if outlet_id is also a valid AcSalesmanGroupID
+            group_check = await conn.fetchrow("""
+                SELECT COUNT(*) as cnt FROM "AcSalesman"
+                WHERE "AcSalesmanGroupID" = $1 AND "Active" = 'Y'
+            """, outlet_id)
+
+            if group_check and group_check['cnt'] == 0:
+                # No staff in this group - find the actual group from sales data
+                actual_group = await conn.fetchrow("""
+                    SELECT DISTINCT s."AcSalesmanGroupID" as group_id
+                    FROM analytics.mv_staff_daily_kpi k
+                    INNER JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
+                    WHERE k.outlet_id = $1
+                    LIMIT 1
+                """, outlet_id)
+                if actual_group and actual_group['group_id']:
+                    staff_group = actual_group['group_id']
+
         # HYBRID: Get outlet summary from MV (excluding today) + real-time for today
         if view_all and outlet_list:
             # Aggregate across specified outlets
@@ -736,42 +804,76 @@ async def get_team_overview(
             """, outlet_id, start_date, end_date, today)
 
         # Step 2: Today's data from base tables (real-time) - only for single outlet
+        # OPTIMIZED: Run separate simpler queries instead of complex CTE
+        # Requires indexes: idx_accsm_location_date, idx_accusinvoicem_location_date
         today_summary = None
         if not view_all and end_date >= today:
-            today_summary = await conn.fetchrow("""
-                WITH combined AS (
-                    SELECT d."ItemTotal" as amount, d."ItemCost" as cost, s."AcStockUDGroup1ID" as stock_group, m."DocumentNo" as doc
-                    FROM "AcCSM" m
-                    INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
-                    LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
-                    WHERE m."AcLocationID" = $1 AND m."DocumentDate" >= $2 AND m."DocumentDate" < $3
-                    UNION ALL
-                    SELECT d."ItemTotalPrice", 0, s."AcStockUDGroup1ID", m."AcCusInvoiceMID"
-                    FROM "AcCusInvoiceM" m
-                    INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
-                    LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
-                    WHERE m."AcLocationID" = $1 AND m."DocumentDate" >= $2 AND m."DocumentDate" < $3
-                ),
-                pwp AS (
-                    SELECT COALESCE(SUM(d."ItemTotal"), 0) as pwp_sales
-                    FROM "AcCSM" m
-                    INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
-                    INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
-                    WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
-                      AND m."AcLocationID" = $1 AND m."DocumentDate" >= $2 AND m."DocumentDate" < $3
-                )
+            # Query 1: Cash sales summary (uses idx_accsm_location_date)
+            cash_query = conn.fetchrow("""
                 SELECT
-                    COUNT(DISTINCT doc) as transactions,
-                    COALESCE(SUM(amount), 0) as total_sales,
-                    COALESCE(SUM(amount - COALESCE(cost, 0)), 0) as gross_profit,
-                    COALESCE(SUM(CASE WHEN stock_group = 'HOUSE BRAND' THEN amount ELSE 0 END), 0) as house_brand_sales,
-                    COALESCE(SUM(CASE WHEN stock_group = 'FOCUSED ITEM 1' THEN amount ELSE 0 END), 0) as focused_1_sales,
-                    COALESCE(SUM(CASE WHEN stock_group = 'FOCUSED ITEM 2' THEN amount ELSE 0 END), 0) as focused_2_sales,
-                    COALESCE(SUM(CASE WHEN stock_group = 'FOCUSED ITEM 3' THEN amount ELSE 0 END), 0) as focused_3_sales,
-                    COALESCE(SUM(CASE WHEN stock_group = 'STOCK CLEARANCE' THEN amount ELSE 0 END), 0) as clearance_sales,
-                    (SELECT pwp_sales FROM pwp) as pwp_sales
-                FROM combined
+                    COUNT(DISTINCT m."DocumentNo") as transactions,
+                    COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
+                    COALESCE(SUM(d."ItemTotal" - COALESCE(d."ItemCost" * d."ItemQuantity", 0)), 0) as gross_profit,
+                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
+                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
+                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
+                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
+                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                FROM "AcCSM" m
+                INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
+                LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                WHERE m."AcLocationID" = $1
+                  AND m."DocumentDate" >= $2
+                  AND m."DocumentDate" < $3
             """, outlet_id, today_start, today_end)
+
+            # Query 2: Invoice sales summary (uses idx_accusinvoicem_location_date)
+            invoice_query = conn.fetchrow("""
+                SELECT
+                    COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
+                    COALESCE(SUM(d."ItemTotalPrice"), 0) as total_sales,
+                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand_sales,
+                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
+                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
+                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
+                    COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales
+                FROM "AcCusInvoiceM" m
+                INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
+                LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                WHERE m."AcLocationID" = $1
+                  AND m."DocumentDate" >= $2
+                  AND m."DocumentDate" < $3
+            """, outlet_id, today_start, today_end)
+
+            # Query 3: PWP sales (uses idx_accsdpromotiontype_promotion)
+            pwp_query = conn.fetchrow("""
+                SELECT COALESCE(SUM(d."ItemTotal"), 0) as pwp_sales
+                FROM "AcCSD" d
+                INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
+                WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
+                  AND m."AcLocationID" = $1
+                  AND m."DocumentDate" >= $2
+                  AND m."DocumentDate" < $3
+            """, outlet_id, today_start, today_end)
+
+            # Run all three queries in parallel
+            cash_result, invoice_result, pwp_result = await asyncio.gather(
+                cash_query, invoice_query, pwp_query
+            )
+
+            # Combine results
+            today_summary = {
+                'transactions': (cash_result['transactions'] or 0) + (invoice_result['transactions'] or 0),
+                'total_sales': float(cash_result['total_sales'] or 0) + float(invoice_result['total_sales'] or 0),
+                'gross_profit': float(cash_result['gross_profit'] or 0),  # Invoice GP not tracked in real-time
+                'house_brand_sales': float(cash_result['house_brand_sales'] or 0) + float(invoice_result['house_brand_sales'] or 0),
+                'focused_1_sales': float(cash_result['focused_1_sales'] or 0) + float(invoice_result['focused_1_sales'] or 0),
+                'focused_2_sales': float(cash_result['focused_2_sales'] or 0) + float(invoice_result['focused_2_sales'] or 0),
+                'focused_3_sales': float(cash_result['focused_3_sales'] or 0) + float(invoice_result['focused_3_sales'] or 0),
+                'clearance_sales': float(cash_result['clearance_sales'] or 0) + float(invoice_result['clearance_sales'] or 0),
+                'pwp_sales': float(pwp_result['pwp_sales'] or 0)
+            }
 
         # Combine MV + today
         def sf(val): return float(val) if val else 0.0
@@ -1392,6 +1494,200 @@ async def unsubscribe_from_push(data: UnsubscribeRequest):
         raise HTTPException(status_code=500, detail=f"Unsubscribe failed: {str(e)}")
 
 
+async def send_push_to_staff(staff_id: str, title: str, message: str, data: dict = None):
+    """Send push notification to all subscribed devices of a staff member."""
+    if not PUSH_AVAILABLE:
+        return {"success": False, "error": "Push notifications not available"}
+
+    if VAPID_PRIVATE_KEY == 'your-private-key-here':
+        return {"success": False, "error": "VAPID keys not configured"}
+
+    sent = 0
+    failed = 0
+    errors = []
+
+    try:
+        async with pool.acquire() as conn:
+            subscriptions = await conn.fetch("""
+                SELECT endpoint, p256dh, auth
+                FROM kpi.push_subscriptions
+                WHERE staff_id = $1
+            """, staff_id)
+
+            payload = json.dumps({
+                "title": title,
+                "message": message,
+                "data": data or {},
+                "timestamp": datetime.now().isoformat()
+            })
+
+            for sub in subscriptions:
+                try:
+                    webpush(
+                        subscription_info={
+                            "endpoint": sub['endpoint'],
+                            "keys": {
+                                "p256dh": sub['p256dh'],
+                                "auth": sub['auth']
+                            }
+                        },
+                        data=payload,
+                        vapid_private_key=VAPID_PRIVATE_KEY,
+                        vapid_claims=VAPID_CLAIMS
+                    )
+                    sent += 1
+                except WebPushException as e:
+                    failed += 1
+                    errors.append(str(e))
+                    # Remove invalid subscriptions (410 Gone)
+                    if e.response and e.response.status_code == 410:
+                        await conn.execute("""
+                            DELETE FROM kpi.push_subscriptions WHERE endpoint = $1
+                        """, sub['endpoint'])
+
+        return {"success": True, "sent": sent, "failed": failed, "errors": errors[:5]}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+class SendNotificationRequest(BaseModel):
+    staff_id: str
+    title: str
+    message: str
+    notification_type: str = "info"  # info, achievement, commission, alert
+    data: Optional[dict] = None
+    save_to_db: bool = True
+
+
+@app.post("/api/v1/push/send")
+async def send_push_notification(
+    request: SendNotificationRequest,
+    api_key: str = Query(..., description="API key for authentication")
+):
+    """Send push notification to a specific staff member.
+
+    Use this endpoint from the sync service to notify on sales events.
+    """
+    expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
+    if api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # Optionally save to notifications table
+    if request.save_to_db:
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO kpi.notifications (staff_id, title, message, type, data)
+                    VALUES ($1, $2, $3, $4, $5)
+                """, request.staff_id, request.title, request.message,
+                    request.notification_type, json.dumps(request.data or {}))
+        except Exception as e:
+            print(f"Failed to save notification to DB: {e}")
+
+    # Send push notification
+    result = await send_push_to_staff(
+        staff_id=request.staff_id,
+        title=request.title,
+        message=request.message,
+        data={"type": request.notification_type, **(request.data or {})}
+    )
+
+    return result
+
+
+class SalesEventNotification(BaseModel):
+    staff_id: str
+    staff_name: str
+    sale_type: str  # house_brand, focused_1, focused_2, focused_3, pwp, clearance
+    amount: float
+    product_name: Optional[str] = None
+    outlet_id: Optional[str] = None
+
+
+@app.post("/api/v1/push/sales-event")
+async def notify_sales_event(
+    event: SalesEventNotification,
+    api_key: str = Query(..., description="API key for authentication")
+):
+    """Notify staff of a sales achievement. Called by sync service on new sales.
+
+    Generates motivational messages for different sale types.
+    """
+    expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
+    if api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # Generate motivational message based on sale type
+    messages = {
+        "house_brand": [
+            f"House Brand sale RM{event.amount:.2f}! Keep pushing! 🏠",
+            f"Nice! RM{event.amount:.2f} House Brand sold! You're on fire! 🔥",
+            f"RM{event.amount:.2f} House Brand! Great job promoting our brands! 💪"
+        ],
+        "focused_1": [
+            f"Focused Item 1 sale! RM{event.amount:.2f} - Excellent focus! 🎯",
+            f"RM{event.amount:.2f} Focused Item 1! Target locked! 🎯"
+        ],
+        "focused_2": [
+            f"Focused Item 2 sale! RM{event.amount:.2f} - Keep it up! ⭐",
+            f"RM{event.amount:.2f} Focused Item 2! You're crushing it! 💥"
+        ],
+        "focused_3": [
+            f"Focused Item 3 sale! RM{event.amount:.2f} - Amazing! 🌟",
+        ],
+        "pwp": [
+            f"PWP sale RM{event.amount:.2f}! Great upselling! 🛒",
+            f"RM{event.amount:.2f} PWP! Awesome add-on sale! 🎁"
+        ],
+        "clearance": [
+            f"Stock Clearance RM{event.amount:.2f}! Helping clear inventory! 📦",
+        ]
+    }
+
+    sale_messages = messages.get(event.sale_type, [f"New sale RM{event.amount:.2f}!"])
+    message = random.choice(sale_messages)
+
+    title_map = {
+        "house_brand": "🏠 House Brand Sale!",
+        "focused_1": "🎯 Focused Item 1!",
+        "focused_2": "⭐ Focused Item 2!",
+        "focused_3": "🌟 Focused Item 3!",
+        "pwp": "🛒 PWP Sale!",
+        "clearance": "📦 Clearance Sale!"
+    }
+    title = title_map.get(event.sale_type, "💰 New Sale!")
+
+    # Send push notification
+    result = await send_push_to_staff(
+        staff_id=event.staff_id,
+        title=title,
+        message=message,
+        data={
+            "type": "sale",
+            "sale_type": event.sale_type,
+            "amount": event.amount,
+            "product": event.product_name,
+            "outlet": event.outlet_id
+        }
+    )
+
+    return result
+
+
+@app.post("/api/v1/push/test")
+async def send_test_notification(
+    staff_id: str = Query(..., description="Staff ID to send test notification to")
+):
+    """Send a test push notification to verify setup."""
+    result = await send_push_to_staff(
+        staff_id=staff_id,
+        title="🔔 Test Notification",
+        message="Push notifications are working! You'll receive sales alerts here.",
+        data={"type": "test"}
+    )
+    return result
+
+
 # ============================================================================
 # Debug Endpoints
 # ============================================================================
@@ -1431,7 +1727,15 @@ async def refresh_materialized_views(
 
             for view in views:
                 view_start = time.time()
-                await conn.execute(f'REFRESH MATERIALIZED VIEW {view}')
+                try:
+                    # Use CONCURRENTLY to avoid blocking reads (requires unique index)
+                    await conn.execute(f'REFRESH MATERIALIZED VIEW CONCURRENTLY {view}')
+                except Exception as e:
+                    # Fall back to regular refresh if CONCURRENTLY fails (no unique index)
+                    if 'unique index' in str(e).lower():
+                        await conn.execute(f'REFRESH MATERIALIZED VIEW {view}')
+                    else:
+                        raise e
                 results[view] = round(time.time() - view_start, 1)
 
         total_time = round(time.time() - start_time, 1)
