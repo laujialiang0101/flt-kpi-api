@@ -83,6 +83,7 @@ ROLE_MAPPING = {
     'AREA MANAGER': 'area_manager',
     'OPERATIONS_MANAGER': 'operations_manager',
     'OPERATIONS MANAGER': 'operations_manager',
+    'OOM': 'operations_manager',  # OOM = Outlet Operations Manager
     'CASHIER': 'staff',
     'PRICE CHECKER': 'staff',
 }
