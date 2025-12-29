@@ -293,10 +293,12 @@ async def login(request: LoginRequest):
                         ]
                     else:
                         # Group ID doesn't match location - find actual outlet from sales data
+                        # Order by sale_date DESC to get the most recent outlet
                         actual_outlet = await conn.fetchrow("""
-                            SELECT DISTINCT outlet_id
+                            SELECT outlet_id
                             FROM analytics.mv_staff_daily_kpi
                             WHERE staff_id = $1
+                            ORDER BY sale_date DESC
                             LIMIT 1
                         """, user['code'])
 
