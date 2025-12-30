@@ -157,8 +157,10 @@ ROLE_PERMISSIONS = {
 # In-memory session store (for production, use Redis)
 sessions = {}
 
-# Database configuration - Use INTERNAL Render hostname for faster MV refreshes
-DB_HOST = os.getenv('DB_HOST', 'dpg-d4pr99je5dus73eb5730.singapore-postgres.render.com')
+# Database configuration
+# Internal hostname (no -a) for Render-to-Render, external (-a) as fallback
+INTERNAL_HOST = 'dpg-d4pr99je5dus73eb5730.singapore-postgres.render.com'
+EXTERNAL_HOST = 'dpg-d4pr99je5dus73eb5730-a.singapore-postgres.render.com'
 DB_PORT = int(os.getenv('DB_PORT', 5432))
 DB_NAME = os.getenv('DB_NAME', 'flt_sales_commission_db')
 DB_USER = os.getenv('DB_USER', 'flt_sales_commission_db_user')
@@ -168,20 +170,42 @@ DB_PASSWORD = os.getenv('DB_PASSWORD', 'Wy0ZP1wjLPsIta0YLpYLeRWgdITbya2m')
 pool: asyncpg.Pool = None
 
 
-async def create_pool_with_retry(max_retries: int = 5, initial_delay: float = 3.0):
-    """Create connection pool with retry logic for Render deployment."""
+async def create_pool_with_retry():
+    """Create connection pool - try internal (no SSL) then external (with SSL)."""
     import sys
 
-    last_error = None
-    delay = initial_delay
-
-    for attempt in range(max_retries):
+    # Try internal first (no SSL - internal network is already secure)
+    print(f"Trying INTERNAL host (no SSL): {INTERNAL_HOST}", flush=True)
+    for attempt in range(3):
         try:
-            print(f"Connecting to {DB_HOST} (attempt {attempt + 1}/{max_retries})...", flush=True)
-            sys.stdout.flush()
-
+            print(f"  Attempt {attempt + 1}/3...", flush=True)
             created_pool = await asyncpg.create_pool(
-                host=DB_HOST,
+                host=INTERNAL_HOST,
+                port=DB_PORT,
+                database=DB_NAME,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                ssl=False,  # No SSL for internal
+                min_size=1,
+                max_size=10,
+                command_timeout=60,
+            )
+            async with created_pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            print(f"SUCCESS with internal host (no SSL)!", flush=True)
+            return created_pool
+        except Exception as e:
+            print(f"  Failed: {type(e).__name__}: {e}", flush=True)
+            if attempt < 2:
+                await asyncio.sleep(2)
+
+    # Try external with SSL
+    print(f"Trying EXTERNAL host (with SSL): {EXTERNAL_HOST}", flush=True)
+    for attempt in range(3):
+        try:
+            print(f"  Attempt {attempt + 1}/3...", flush=True)
+            created_pool = await asyncpg.create_pool(
+                host=EXTERNAL_HOST,
                 port=DB_PORT,
                 database=DB_NAME,
                 user=DB_USER,
@@ -191,25 +215,16 @@ async def create_pool_with_retry(max_retries: int = 5, initial_delay: float = 3.
                 max_size=10,
                 command_timeout=60,
             )
-
-            # Test the connection
             async with created_pool.acquire() as conn:
-                result = await conn.fetchval("SELECT 1")
-                print(f"Connection test successful: {result}", flush=True)
-
-            print(f"Database pool created successfully!", flush=True)
+                await conn.fetchval("SELECT 1")
+            print(f"SUCCESS with external host (SSL)!", flush=True)
             return created_pool
-
         except Exception as e:
-            last_error = e
-            print(f"Attempt {attempt + 1} failed: {type(e).__name__}: {e}", flush=True)
-            sys.stdout.flush()
-            if attempt < max_retries - 1:
-                print(f"Retrying in {delay} seconds...", flush=True)
-                await asyncio.sleep(delay)
-                delay = min(delay * 1.5, 30)
+            print(f"  Failed: {type(e).__name__}: {e}", flush=True)
+            if attempt < 2:
+                await asyncio.sleep(2)
 
-    raise last_error
+    raise Exception("All connection attempts failed")
 
 
 @asynccontextmanager
