@@ -168,10 +168,12 @@ DB_PASSWORD = os.getenv('DB_PASSWORD', 'Wy0ZP1wjLPsIta0YLpYLeRWgdITbya2m')
 
 # Global connection pool
 pool: asyncpg.Pool = None
+connected_host: str = None  # Track which host we're connected to
 
 
 async def create_pool_with_retry():
     """Create connection pool - try internal (no SSL) then external (with SSL)."""
+    global connected_host
     import sys
 
     # Try internal first (no SSL - internal network is already secure)
@@ -193,6 +195,7 @@ async def create_pool_with_retry():
             async with created_pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
             print(f"SUCCESS with internal host (no SSL)!", flush=True)
+            connected_host = f"{INTERNAL_HOST} (internal, no SSL)"
             return created_pool
         except Exception as e:
             print(f"  Failed: {type(e).__name__}: {e}", flush=True)
@@ -218,6 +221,7 @@ async def create_pool_with_retry():
             async with created_pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
             print(f"SUCCESS with external host (SSL)!", flush=True)
+            connected_host = f"{EXTERNAL_HOST} (external, SSL)"
             return created_pool
         except Exception as e:
             print(f"  Failed: {type(e).__name__}: {e}", flush=True)
@@ -651,9 +655,14 @@ async def health():
     try:
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
-        return {"status": "healthy", "database": "connected"}
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "host": connected_host,
+            "is_internal": "internal" in (connected_host or "")
+        }
     except Exception as e:
-        return {"status": "unhealthy", "error": str(e)}
+        return {"status": "unhealthy", "error": str(e), "host": connected_host}
 
 
 @app.get("/api/v1/kpi/me")
