@@ -10,8 +10,6 @@ services:
     envVars:
       - key: DB_HOST
         value: dpg-d4pr99je5dus73eb5730.singapore-postgres.render.com
-      - key: DB_PORT
-        value: 5432
       - key: DB_NAME
         value: flt_sales_commission_db
       - key: DB_USER

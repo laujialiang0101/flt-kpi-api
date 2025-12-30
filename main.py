@@ -157,102 +157,57 @@ ROLE_PERMISSIONS = {
 # In-memory session store (for production, use Redis)
 sessions = {}
 
-# Database configuration
-import ssl
-
-# Use DATABASE_URL if available (Render provides this)
-DATABASE_URL = os.getenv('DATABASE_URL')
-
-# Database credentials
+# Database configuration - Use INTERNAL Render hostname for faster MV refreshes
+DB_HOST = os.getenv('DB_HOST', 'dpg-d4pr99je5dus73eb5730.singapore-postgres.render.com')
 DB_PORT = int(os.getenv('DB_PORT', 5432))
 DB_NAME = os.getenv('DB_NAME', 'flt_sales_commission_db')
 DB_USER = os.getenv('DB_USER', 'flt_sales_commission_db_user')
 DB_PASSWORD = os.getenv('DB_PASSWORD', 'Wy0ZP1wjLPsIta0YLpYLeRWgdITbya2m')
 
-# Hostnames to try (external first since it's more reliable for cross-region)
-DB_HOSTS = [
-    os.getenv('DB_HOST', 'dpg-d4pr99je5dus73eb5730-a.singapore-postgres.render.com'),  # External (with -a)
-    'dpg-d4pr99je5dus73eb5730.singapore-postgres.render.com',  # Internal (no -a)
-]
-
 # Global connection pool
 pool: asyncpg.Pool = None
 
 
-def create_ssl_context():
-    """Create a permissive SSL context for Render PostgreSQL."""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
-async def create_pool_with_retry(max_retries: int = 3, initial_delay: float = 2.0):
+async def create_pool_with_retry(max_retries: int = 5, initial_delay: float = 3.0):
     """Create connection pool with retry logic for Render deployment."""
     import sys
 
-    # SSL options to try in order
-    ssl_options = [
-        ('ssl=True', True),
-        ('ssl context', create_ssl_context()),
-        ('sslmode in DSN', 'prefer'),
-    ]
-
-    # If DATABASE_URL is set, use it directly
-    if DATABASE_URL:
-        print(f"Using DATABASE_URL environment variable", flush=True)
-        for ssl_name, ssl_val in ssl_options:
-            for attempt in range(max_retries):
-                try:
-                    print(f"Attempt {attempt + 1}/{max_retries} with {ssl_name}...", flush=True)
-                    created_pool = await asyncpg.create_pool(
-                        DATABASE_URL,
-                        min_size=1,
-                        max_size=10,
-                        command_timeout=60,
-                        ssl=ssl_val,
-                    )
-                    print("Database pool created successfully!", flush=True)
-                    return created_pool
-                except Exception as e:
-                    print(f"Attempt {attempt + 1} failed: {type(e).__name__}: {e}", flush=True)
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(initial_delay * (2 ** attempt))
-        raise Exception("Failed to connect using DATABASE_URL")
-
-    # Try each hostname with different SSL options
     last_error = None
-    for host in DB_HOSTS:
-        print(f"Trying host: {host}", flush=True)
+    delay = initial_delay
 
-        for ssl_name, ssl_val in ssl_options:
-            for attempt in range(max_retries):
-                delay = initial_delay * (2 ** attempt)
-                try:
-                    print(f"  Attempt {attempt + 1}/{max_retries} with {ssl_name}...", flush=True)
-                    created_pool = await asyncpg.create_pool(
-                        host=host,
-                        port=DB_PORT,
-                        database=DB_NAME,
-                        user=DB_USER,
-                        password=DB_PASSWORD,
-                        ssl=ssl_val,
-                        min_size=1,
-                        max_size=10,
-                        command_timeout=60,
-                    )
-                    print(f"Database pool created successfully with host: {host}, {ssl_name}", flush=True)
-                    return created_pool
-                except Exception as e:
-                    last_error = e
-                    print(f"  Failed: {type(e).__name__}: {e}", flush=True)
-                    sys.stdout.flush()
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(delay)
+    for attempt in range(max_retries):
+        try:
+            print(f"Connecting to {DB_HOST} (attempt {attempt + 1}/{max_retries})...", flush=True)
+            sys.stdout.flush()
 
-            print(f"  All attempts failed for {ssl_name}", flush=True)
+            created_pool = await asyncpg.create_pool(
+                host=DB_HOST,
+                port=DB_PORT,
+                database=DB_NAME,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                ssl='require',
+                min_size=1,
+                max_size=10,
+                command_timeout=60,
+            )
 
-        print(f"All SSL options failed for host: {host}", flush=True)
+            # Test the connection
+            async with created_pool.acquire() as conn:
+                result = await conn.fetchval("SELECT 1")
+                print(f"Connection test successful: {result}", flush=True)
+
+            print(f"Database pool created successfully!", flush=True)
+            return created_pool
+
+        except Exception as e:
+            last_error = e
+            print(f"Attempt {attempt + 1} failed: {type(e).__name__}: {e}", flush=True)
+            sys.stdout.flush()
+            if attempt < max_retries - 1:
+                print(f"Retrying in {delay} seconds...", flush=True)
+                await asyncio.sleep(delay)
+                delay = min(delay * 1.5, 30)
 
     raise last_error
 
