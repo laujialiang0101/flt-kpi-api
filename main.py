@@ -1029,7 +1029,54 @@ async def get_team_overview(
         # Requires indexes: idx_accsm_location_date, idx_accusinvoicem_location_date
         today_summary = None
         if end_date >= today:
-            if view_all:
+            if view_all and outlet_list:
+                # Filter by specific allowed outlets
+                cash_result = await conn.fetchrow("""
+                    SELECT
+                        COUNT(DISTINCT m."DocumentNo") as transactions,
+                        COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
+                        COALESCE(SUM(d."ItemTotal" - COALESCE(d."ItemCost" * d."ItemQuantity", 0)), 0) as gross_profit,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                    FROM "AcCSM" m
+                    INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
+                    LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                    WHERE m."DocumentDate" >= $1
+                      AND m."DocumentDate" < $2
+                      AND m."AcLocationID" = ANY($3)
+                """, today_start, today_end, outlet_list)
+
+                invoice_result = await conn.fetchrow("""
+                    SELECT
+                        COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
+                        COALESCE(SUM(d."ItemTotalPrice"), 0) as total_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales
+                    FROM "AcCusInvoiceM" m
+                    INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
+                    LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                    WHERE m."DocumentDate" >= $1
+                      AND m."DocumentDate" < $2
+                      AND m."AcLocationID" = ANY($3)
+                """, today_start, today_end, outlet_list)
+
+                pwp_result = await conn.fetchrow("""
+                    SELECT COALESCE(SUM(d."ItemTotal"), 0) as pwp_sales
+                    FROM "AcCSD" d
+                    INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                    INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
+                    WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
+                      AND m."DocumentDate" >= $1
+                      AND m."DocumentDate" < $2
+                      AND m."AcLocationID" = ANY($3)
+                """, today_start, today_end, outlet_list)
+            elif view_all:
                 # All outlets - no location filter
                 cash_result = await conn.fetchrow("""
                     SELECT
