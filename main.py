@@ -64,12 +64,6 @@ class SetPasswordRequest(BaseModel):
     new_password: str
 
 
-class ChangePasswordRequest(BaseModel):
-    code: str
-    current_password: str
-    new_password: str
-
-
 class LoginResponse(BaseModel):
     success: bool
     user: Optional[dict] = None
@@ -594,44 +588,6 @@ async def set_password(request: SetPasswordRequest):
 
     except Exception as e:
         return {"success": False, "error": f"Failed to set password: {str(e)}"}
-
-
-@app.post("/api/v1/auth/change-password")
-async def change_password(request: ChangePasswordRequest):
-    """Change KPI Tracker password for existing users."""
-    try:
-        # Validate new password requirements
-        if len(request.new_password) < 4:
-            return {"success": False, "error": "New password must be at least 4 characters"}
-
-        async with pool.acquire() as conn:
-            # Verify user exists and get current password hash
-            kpi_auth = await conn.fetchrow("""
-                SELECT code, password_hash FROM kpi_user_auth WHERE UPPER(code) = UPPER($1)
-            """, request.code)
-
-            if not kpi_auth:
-                return {"success": False, "error": "User not found. Set password first."}
-
-            # Verify current password
-            if not verify_password(request.current_password, kpi_auth['password_hash']):
-                return {"success": False, "error": "Current password is incorrect"}
-
-            # Hash and update the password
-            new_password_hash = hash_password(request.new_password)
-            await conn.execute("""
-                UPDATE kpi_user_auth
-                SET password_hash = $1, updated_at = CURRENT_TIMESTAMP
-                WHERE UPPER(code) = UPPER($2)
-            """, new_password_hash, request.code)
-
-            return {
-                "success": True,
-                "message": "Password changed successfully"
-            }
-
-    except Exception as e:
-        return {"success": False, "error": f"Failed to change password: {str(e)}"}
 
 
 @app.get("/health")
