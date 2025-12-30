@@ -158,65 +158,91 @@ ROLE_PERMISSIONS = {
 sessions = {}
 
 # Database configuration
-# Use DATABASE_URL if available (Render provides this), otherwise use individual params
-# IMPORTANT: Use INTERNAL hostname (without -a) for Render-to-Render connections
+import ssl
+
+# Use DATABASE_URL if available (Render provides this)
 DATABASE_URL = os.getenv('DATABASE_URL')
 
-# Fallback configuration using internal hostname for Render
-DB_HOST = os.getenv('DB_HOST', 'dpg-d4pr99je5dus73eb5730.singapore-postgres.render.com')  # Internal (no -a)
+# Database credentials
 DB_PORT = int(os.getenv('DB_PORT', 5432))
 DB_NAME = os.getenv('DB_NAME', 'flt_sales_commission_db')
 DB_USER = os.getenv('DB_USER', 'flt_sales_commission_db_user')
 DB_PASSWORD = os.getenv('DB_PASSWORD', 'Wy0ZP1wjLPsIta0YLpYLeRWgdITbya2m')
 
+# Hostnames to try (external first since it's more reliable for cross-region)
+DB_HOSTS = [
+    os.getenv('DB_HOST', 'dpg-d4pr99je5dus73eb5730-a.singapore-postgres.render.com'),  # External (with -a)
+    'dpg-d4pr99je5dus73eb5730.singapore-postgres.render.com',  # Internal (no -a)
+]
+
 # Global connection pool
 pool: asyncpg.Pool = None
 
 
-async def create_pool_with_retry(max_retries: int = 5, initial_delay: float = 2.0):
+def create_ssl_context():
+    """Create a permissive SSL context for Render PostgreSQL."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+async def create_pool_with_retry(max_retries: int = 3, initial_delay: float = 2.0):
     """Create connection pool with retry logic for Render deployment."""
     import sys
-    delay = initial_delay
-    last_error = None
 
-    for attempt in range(max_retries):
-        try:
-            print(f"Attempting to create database pool (attempt {attempt + 1}/{max_retries})...", flush=True)
-
-            if DATABASE_URL:
-                # Use DATABASE_URL (preferred for Render)
-                print(f"Using DATABASE_URL", flush=True)
+    # If DATABASE_URL is set, use it directly
+    if DATABASE_URL:
+        print(f"Using DATABASE_URL environment variable", flush=True)
+        for attempt in range(max_retries):
+            try:
+                print(f"Attempt {attempt + 1}/{max_retries}...", flush=True)
                 created_pool = await asyncpg.create_pool(
                     DATABASE_URL,
                     min_size=1,
                     max_size=10,
                     command_timeout=60,
+                    ssl=create_ssl_context(),
                 )
-            else:
-                # Use individual parameters with internal hostname
-                print(f"Using individual params, host: {DB_HOST}", flush=True)
+                print("Database pool created successfully!", flush=True)
+                return created_pool
+            except Exception as e:
+                print(f"Attempt {attempt + 1} failed: {type(e).__name__}: {e}", flush=True)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(initial_delay * (2 ** attempt))
+        raise Exception("Failed to connect using DATABASE_URL")
+
+    # Try each hostname
+    last_error = None
+    for host in DB_HOSTS:
+        print(f"Trying host: {host}", flush=True)
+
+        for attempt in range(max_retries):
+            delay = initial_delay * (2 ** attempt)
+            try:
+                print(f"  Attempt {attempt + 1}/{max_retries} with SSL context...", flush=True)
                 created_pool = await asyncpg.create_pool(
-                    host=DB_HOST,
+                    host=host,
                     port=DB_PORT,
                     database=DB_NAME,
                     user=DB_USER,
                     password=DB_PASSWORD,
-                    ssl='require',
+                    ssl=create_ssl_context(),
                     min_size=1,
                     max_size=10,
                     command_timeout=60,
                 )
+                print(f"Database pool created successfully with host: {host}", flush=True)
+                return created_pool
+            except Exception as e:
+                last_error = e
+                print(f"  Attempt {attempt + 1} failed: {type(e).__name__}: {e}", flush=True)
+                sys.stdout.flush()
+                if attempt < max_retries - 1:
+                    print(f"  Retrying in {delay} seconds...", flush=True)
+                    await asyncio.sleep(delay)
 
-            print("Database pool created successfully!", flush=True)
-            return created_pool
-        except Exception as e:
-            last_error = e
-            print(f"Connection attempt {attempt + 1} failed: {type(e).__name__}: {e}", flush=True)
-            sys.stdout.flush()
-            if attempt < max_retries - 1:
-                print(f"Retrying in {delay} seconds...", flush=True)
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 30)  # Exponential backoff, max 30 seconds
+        print(f"All attempts failed for host: {host}", flush=True)
 
     raise last_error
 
