@@ -158,8 +158,9 @@ ROLE_PERMISSIONS = {
 sessions = {}
 
 # Database configuration
-# Internal hostname (no -a) for Render-to-Render, external (-a) as fallback
-INTERNAL_HOST = 'dpg-d4pr99je5dus73eb5730.singapore-postgres.render.com'
+# Internal hostname = just the DB ID (no domain) - only works within Render network
+# External hostname = full domain with -a suffix - works from anywhere
+INTERNAL_HOST = 'dpg-d4pr99je5dus73eb5730'  # True internal format per Render docs
 EXTERNAL_HOST = 'dpg-d4pr99je5dus73eb5730-a.singapore-postgres.render.com'
 DB_PORT = int(os.getenv('DB_PORT', 5432))
 DB_NAME = os.getenv('DB_NAME', 'flt_sales_commission_db')
@@ -172,11 +173,63 @@ connected_host: str = None  # Track which host we're connected to
 
 
 async def create_pool_with_retry():
-    """Create connection pool - external first (proven), internal as fallback."""
+    """Create connection pool - try internal first (faster), then external."""
     global connected_host
     import sys
 
-    # Try external first - this is proven to work
+    # Try internal first (faster, private network) - no SSL needed for internal
+    print(f"Trying INTERNAL host (no SSL): {INTERNAL_HOST}", flush=True)
+    for attempt in range(2):
+        try:
+            print(f"  Attempt {attempt + 1}/2...", flush=True)
+            created_pool = await asyncpg.create_pool(
+                host=INTERNAL_HOST,
+                port=DB_PORT,
+                database=DB_NAME,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                ssl=False,  # Internal network doesn't need SSL
+                min_size=1,
+                max_size=10,
+                command_timeout=60,
+            )
+            async with created_pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            print(f"SUCCESS with internal host (no SSL)!", flush=True)
+            connected_host = f"{INTERNAL_HOST} (internal, no SSL)"
+            return created_pool
+        except Exception as e:
+            print(f"  Failed: {type(e).__name__}: {e}", flush=True)
+            if attempt < 1:
+                await asyncio.sleep(1)
+
+    # Try internal with SSL (in case it's required)
+    print(f"Trying INTERNAL host (with SSL): {INTERNAL_HOST}", flush=True)
+    for attempt in range(2):
+        try:
+            print(f"  Attempt {attempt + 1}/2...", flush=True)
+            created_pool = await asyncpg.create_pool(
+                host=INTERNAL_HOST,
+                port=DB_PORT,
+                database=DB_NAME,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                ssl='require',
+                min_size=1,
+                max_size=10,
+                command_timeout=60,
+            )
+            async with created_pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            print(f"SUCCESS with internal host (SSL)!", flush=True)
+            connected_host = f"{INTERNAL_HOST} (internal, SSL)"
+            return created_pool
+        except Exception as e:
+            print(f"  Failed: {type(e).__name__}: {e}", flush=True)
+            if attempt < 1:
+                await asyncio.sleep(1)
+
+    # Fallback to external (always works, but slower)
     print(f"Trying EXTERNAL host (SSL): {EXTERNAL_HOST}", flush=True)
     for attempt in range(3):
         try:
@@ -196,32 +249,6 @@ async def create_pool_with_retry():
                 await conn.fetchval("SELECT 1")
             print(f"SUCCESS with external host (SSL)!", flush=True)
             connected_host = f"{EXTERNAL_HOST} (external, SSL)"
-            return created_pool
-        except Exception as e:
-            print(f"  Failed: {type(e).__name__}: {e}", flush=True)
-            if attempt < 2:
-                await asyncio.sleep(2)
-
-    # Try internal with SSL as fallback (may work within Render network)
-    print(f"Trying INTERNAL host (SSL): {INTERNAL_HOST}", flush=True)
-    for attempt in range(3):
-        try:
-            print(f"  Attempt {attempt + 1}/3...", flush=True)
-            created_pool = await asyncpg.create_pool(
-                host=INTERNAL_HOST,
-                port=DB_PORT,
-                database=DB_NAME,
-                user=DB_USER,
-                password=DB_PASSWORD,
-                ssl='require',
-                min_size=1,
-                max_size=10,
-                command_timeout=60,
-            )
-            async with created_pool.acquire() as conn:
-                await conn.fetchval("SELECT 1")
-            print(f"SUCCESS with internal host (SSL)!", flush=True)
-            connected_host = f"{INTERNAL_HOST} (internal, SSL)"
             return created_pool
         except Exception as e:
             print(f"  Failed: {type(e).__name__}: {e}", flush=True)
