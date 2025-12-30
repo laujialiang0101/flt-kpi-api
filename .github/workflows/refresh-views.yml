@@ -2,11 +2,9 @@ name: Refresh Materialized Views
 
 on:
   schedule:
-    # Every 30 minutes during business hours (8am-10pm Malaysia Time = 0am-2pm UTC)
-    # Note: GitHub Actions uses UTC timezone
-    - cron: '*/30 0-14 * * *'
-    # Final refresh at 11pm Malaysia Time (3pm UTC)
-    - cron: '0 15 * * *'
+    # Every 15 minutes during business hours (8am-11pm Malaysia Time = 0am-3pm UTC)
+    # Note: GitHub Actions uses UTC timezone. Concurrent refresh does not block reads.
+    - cron: '*/15 0-15 * * *'
   # Allow manual trigger
   workflow_dispatch:
 
