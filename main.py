@@ -264,9 +264,9 @@ def check_password_dynamod(plain_password: str, stored_password: str, user_code:
 
     # Method 3: Try fixed XOR key patterns discovered from known passwords
     fixed_patterns = [
-        [6, 3, 4, 2, 3, 4],   # Pattern from LJL
-        [6, 8, 5, 9, 6, 8],   # Pattern from LTK
-        [4, 1, 5, 14],        # Pattern from ID 30
+        [6, 3, 4, 2, 3, 4],   # Pattern from LJL (200101 -> 434335)
+        [6, 8, 5, 9, 6, 8],   # Pattern from LTK (506050 -> 383938)
+        [12, 1, 5, 14],       # Pattern from ID 30 (9202 -> 535<)
         [6, 3, 4],            # Short repeating pattern
     ]
     for pattern in fixed_patterns:
@@ -1398,7 +1398,7 @@ async def get_outlet_performance(
                         COALESCE(SUM(k.focused_3_sales), 0) as focused_3,
                         COALESCE(SUM(k.pwp_sales), 0) as pwp,
                         COALESCE(SUM(k.clearance_sales), 0) as clearance
-                    FROM analytics.mv_outlet_daily_kpi k
+                    FROM analytics.mv_staff_daily_kpi k
                     LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
                     WHERE k.sale_date BETWEEN $1 AND $2
                       AND k.outlet_id = ANY($3)
@@ -1420,7 +1420,7 @@ async def get_outlet_performance(
                         COALESCE(SUM(k.focused_3_sales), 0) as focused_3,
                         COALESCE(SUM(k.pwp_sales), 0) as pwp,
                         COALESCE(SUM(k.clearance_sales), 0) as clearance
-                    FROM analytics.mv_outlet_daily_kpi k
+                    FROM analytics.mv_staff_daily_kpi k
                     LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
                     WHERE k.sale_date BETWEEN $1 AND $2
                     GROUP BY k.outlet_id, l."AcLocationDesc"
@@ -1528,7 +1528,7 @@ async def export_outlet_performance(
                         COALESCE(SUM(k.focused_3_sales), 0) as focused_3,
                         COALESCE(SUM(k.pwp_sales), 0) as pwp,
                         COALESCE(SUM(k.clearance_sales), 0) as clearance
-                    FROM analytics.mv_outlet_daily_kpi k
+                    FROM analytics.mv_staff_daily_kpi k
                     LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
                     WHERE k.sale_date BETWEEN $1 AND $2
                       AND k.outlet_id = ANY($3)
@@ -1550,7 +1550,7 @@ async def export_outlet_performance(
                         COALESCE(SUM(k.focused_3_sales), 0) as focused_3,
                         COALESCE(SUM(k.pwp_sales), 0) as pwp,
                         COALESCE(SUM(k.clearance_sales), 0) as clearance
-                    FROM analytics.mv_outlet_daily_kpi k
+                    FROM analytics.mv_staff_daily_kpi k
                     LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
                     WHERE k.sale_date BETWEEN $1 AND $2
                     GROUP BY k.outlet_id, l."AcLocationDesc"
