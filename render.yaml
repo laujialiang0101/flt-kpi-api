@@ -1,14 +1,15 @@
 services:
   - type: web
     name: flt-kpi-api
-    env: python
+    runtime: python
     plan: free
+    region: singapore
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: DB_HOST
-        value: dpg-d4pr99je5dus73eb5730-a.singapore-postgres.render.com
+        value: dpg-d4pr99je5dus73eb5730.singapore-postgres.render.com
       - key: DB_PORT
         value: 5432
       - key: DB_NAME
