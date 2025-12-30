@@ -1528,12 +1528,18 @@ async def get_outlet_performance(
 
     try:
         async with pool.acquire() as conn:
+            # Use mv_outlet_daily_kpi (includes ALL sales) instead of mv_staff_daily_kpi (staff-attributed only)
+            # This ensures figures match Dynamod which includes all sales regardless of salesman assignment
             if outlet_list:
                 outlets = await conn.fetch("""
                     SELECT
                         k.outlet_id,
                         l."AcLocationDesc" as outlet_name,
-                        COUNT(DISTINCT k.staff_id) as staff_count,
+                        COALESCE((
+                            SELECT COUNT(DISTINCT staff_id)
+                            FROM analytics.mv_staff_daily_kpi
+                            WHERE outlet_id = k.outlet_id AND sale_date BETWEEN $1 AND $2
+                        ), 0) as staff_count,
                         COALESCE(SUM(k.transactions), 0) as transactions,
                         COALESCE(SUM(k.total_sales), 0) as total_sales,
                         COALESCE(SUM(k.gross_profit), 0) as gross_profit,
@@ -1543,7 +1549,7 @@ async def get_outlet_performance(
                         COALESCE(SUM(k.focused_3_sales), 0) as focused_3,
                         COALESCE(SUM(k.pwp_sales), 0) as pwp,
                         COALESCE(SUM(k.clearance_sales), 0) as clearance
-                    FROM analytics.mv_staff_daily_kpi k
+                    FROM analytics.mv_outlet_daily_kpi k
                     LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
                     WHERE k.sale_date BETWEEN $1 AND $2
                       AND k.outlet_id = ANY($3)
@@ -1555,7 +1561,11 @@ async def get_outlet_performance(
                     SELECT
                         k.outlet_id,
                         l."AcLocationDesc" as outlet_name,
-                        COUNT(DISTINCT k.staff_id) as staff_count,
+                        COALESCE((
+                            SELECT COUNT(DISTINCT staff_id)
+                            FROM analytics.mv_staff_daily_kpi
+                            WHERE outlet_id = k.outlet_id AND sale_date BETWEEN $1 AND $2
+                        ), 0) as staff_count,
                         COALESCE(SUM(k.transactions), 0) as transactions,
                         COALESCE(SUM(k.total_sales), 0) as total_sales,
                         COALESCE(SUM(k.gross_profit), 0) as gross_profit,
@@ -1565,7 +1575,7 @@ async def get_outlet_performance(
                         COALESCE(SUM(k.focused_3_sales), 0) as focused_3,
                         COALESCE(SUM(k.pwp_sales), 0) as pwp,
                         COALESCE(SUM(k.clearance_sales), 0) as clearance
-                    FROM analytics.mv_staff_daily_kpi k
+                    FROM analytics.mv_outlet_daily_kpi k
                     LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
                     WHERE k.sale_date BETWEEN $1 AND $2
                     GROUP BY k.outlet_id, l."AcLocationDesc"
@@ -1658,12 +1668,17 @@ async def export_outlet_performance(
 
     try:
         async with pool.acquire() as conn:
+            # Use mv_outlet_daily_kpi (includes ALL sales) for consistent figures with Dynamod
             if outlet_list:
                 outlets = await conn.fetch("""
                     SELECT
                         k.outlet_id,
                         l."AcLocationDesc" as outlet_name,
-                        COUNT(DISTINCT k.staff_id) as staff_count,
+                        COALESCE((
+                            SELECT COUNT(DISTINCT staff_id)
+                            FROM analytics.mv_staff_daily_kpi
+                            WHERE outlet_id = k.outlet_id AND sale_date BETWEEN $1 AND $2
+                        ), 0) as staff_count,
                         COALESCE(SUM(k.transactions), 0) as transactions,
                         COALESCE(SUM(k.total_sales), 0) as total_sales,
                         COALESCE(SUM(k.gross_profit), 0) as gross_profit,
@@ -1673,7 +1688,7 @@ async def export_outlet_performance(
                         COALESCE(SUM(k.focused_3_sales), 0) as focused_3,
                         COALESCE(SUM(k.pwp_sales), 0) as pwp,
                         COALESCE(SUM(k.clearance_sales), 0) as clearance
-                    FROM analytics.mv_staff_daily_kpi k
+                    FROM analytics.mv_outlet_daily_kpi k
                     LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
                     WHERE k.sale_date BETWEEN $1 AND $2
                       AND k.outlet_id = ANY($3)
@@ -1685,7 +1700,11 @@ async def export_outlet_performance(
                     SELECT
                         k.outlet_id,
                         l."AcLocationDesc" as outlet_name,
-                        COUNT(DISTINCT k.staff_id) as staff_count,
+                        COALESCE((
+                            SELECT COUNT(DISTINCT staff_id)
+                            FROM analytics.mv_staff_daily_kpi
+                            WHERE outlet_id = k.outlet_id AND sale_date BETWEEN $1 AND $2
+                        ), 0) as staff_count,
                         COALESCE(SUM(k.transactions), 0) as transactions,
                         COALESCE(SUM(k.total_sales), 0) as total_sales,
                         COALESCE(SUM(k.gross_profit), 0) as gross_profit,
@@ -1695,7 +1714,7 @@ async def export_outlet_performance(
                         COALESCE(SUM(k.focused_3_sales), 0) as focused_3,
                         COALESCE(SUM(k.pwp_sales), 0) as pwp,
                         COALESCE(SUM(k.clearance_sales), 0) as clearance
-                    FROM analytics.mv_staff_daily_kpi k
+                    FROM analytics.mv_outlet_daily_kpi k
                     LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
                     WHERE k.sale_date BETWEEN $1 AND $2
                     GROUP BY k.outlet_id, l."AcLocationDesc"
