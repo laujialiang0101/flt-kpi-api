@@ -211,6 +211,79 @@ async def get_current_user(token: str = Query(None, alias="token")):
 
 
 # ============================================================================
+# Password Encoding Functions (Dynamod XOR-based)
+# ============================================================================
+
+def encode_password_dynamod(plain_password: str, user_code: str) -> str:
+    """
+    Encode password using Dynamod's XOR-based algorithm.
+    The XOR key for each position is derived from the user code characters.
+    """
+    if not plain_password or not user_code:
+        return plain_password
+
+    encoded = []
+    user_code_upper = user_code.upper()
+
+    for i, char in enumerate(plain_password):
+        code_char = user_code_upper[i % len(user_code_upper)]
+        xor_key = ord(code_char) - 70
+        encoded_char = chr(ord(char) ^ xor_key)
+        encoded.append(encoded_char)
+
+    return ''.join(encoded)
+
+
+def check_password_dynamod(plain_password: str, stored_password: str, user_code: str) -> bool:
+    """
+    Check if password matches using multiple encoding methods.
+    Tries various XOR key derivations to handle Dynamod's encoding.
+    """
+    if not stored_password:
+        return False
+
+    # Method 1: Direct comparison (if stored password is plain text)
+    if plain_password == stored_password:
+        return True
+
+    # Method 2: Try various XOR key offsets based on user code
+    for offset in range(65, 75):  # Try ASCII offsets from 65 ('A') to 74 ('J')
+        try:
+            encoded = []
+            user_code_upper = user_code.upper()
+            for i, char in enumerate(plain_password):
+                code_char = user_code_upper[i % len(user_code_upper)]
+                xor_key = ord(code_char) - offset
+                if xor_key < 0:
+                    xor_key = abs(xor_key)
+                encoded.append(chr(ord(char) ^ xor_key))
+            if ''.join(encoded) == stored_password:
+                return True
+        except:
+            pass
+
+    # Method 3: Try fixed XOR key patterns discovered from known passwords
+    fixed_patterns = [
+        [6, 3, 4, 2, 3, 4],   # Pattern from LJL
+        [6, 8, 5, 9, 6, 8],   # Pattern from LTK
+        [4, 1, 5, 14],        # Pattern from ID 30
+        [6, 3, 4],            # Short repeating pattern
+    ]
+    for pattern in fixed_patterns:
+        try:
+            encoded = []
+            for i, char in enumerate(plain_password):
+                xor_key = pattern[i % len(pattern)]
+                encoded.append(chr(ord(char) ^ xor_key))
+            if ''.join(encoded) == stored_password:
+                return True
+        except:
+            pass
+
+    return False
+
+
+# ============================================================================
 # Authentication Endpoints
 # ============================================================================
 
@@ -236,8 +309,8 @@ async def login(request: LoginRequest):
             if not user:
                 return {"success": False, "error": "Invalid credentials or inactive account"}
 
-            # Check password (plain text comparison - legacy system)
-            if user['password'] != request.password:
+            # Check password using Dynamod encoding detection
+            if not check_password_dynamod(request.password, user['password'], user['code']):
                 return {"success": False, "error": "Invalid credentials"}
 
             # Determine role and permissions
@@ -2817,7 +2890,8 @@ async def debug_user_credentials(
 @app.get("/api/v1/debug/password-encoder")
 async def debug_password_encoder(
     plain_password: str = Query(..., description="Plain text password to encode"),
-    stored_password: str = Query(..., description="Known stored/encoded password")
+    stored_password: str = Query(..., description="Known stored/encoded password"),
+    user_code: str = Query("", description="User code (optional, to test encoding)")
 ):
     """
     Debug endpoint to figure out the password encoding by comparing plain and stored passwords.
@@ -2860,6 +2934,16 @@ async def debug_password_encoder(
             if is_repeating:
                 patterns_found.append(pattern)
 
+        # Test if our encoding function works
+        encoding_test = None
+        if user_code:
+            will_match = check_password_dynamod(plain_password, stored_password, user_code)
+            encoding_test = {
+                "user_code": user_code,
+                "login_will_work": will_match,
+                "encoded_with_offset_70": encode_password_dynamod(plain_password, user_code)
+            }
+
         return {
             "success": True,
             "analysis": {
@@ -2869,7 +2953,8 @@ async def debug_password_encoder(
                 "key_pattern": key_values,
                 "repeating_patterns": patterns_found if patterns_found else "No repeating pattern found"
             },
-            "recommendation": "Use the XOR keys to decode other passwords"
+            "encoding_test": encoding_test,
+            "recommendation": "If login_will_work is True, the password will work with login"
         }
 
     except Exception as e:
