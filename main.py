@@ -158,9 +158,9 @@ ROLE_PERMISSIONS = {
 sessions = {}
 
 # Database configuration
-# Internal hostname = just the DB ID (no domain) - only works within Render network
+# Internal hostname = DB ID with -a suffix, NO domain - only works within Render network
 # External hostname = full domain with -a suffix - works from anywhere
-INTERNAL_HOST = 'dpg-d4pr99je5dus73eb5730'  # True internal format per Render docs
+INTERNAL_HOST = 'dpg-d4pr99je5dus73eb5730-a'  # From Render dashboard internal URL
 EXTERNAL_HOST = 'dpg-d4pr99je5dus73eb5730-a.singapore-postgres.render.com'
 DB_PORT = int(os.getenv('DB_PORT', 5432))
 DB_NAME = os.getenv('DB_NAME', 'flt_sales_commission_db')
