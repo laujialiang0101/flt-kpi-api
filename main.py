@@ -158,50 +158,63 @@ ROLE_PERMISSIONS = {
 sessions = {}
 
 # Database configuration
-import ssl
+# Use DATABASE_URL if available (Render provides this), otherwise use individual params
+# IMPORTANT: Use INTERNAL hostname (without -a) for Render-to-Render connections
+DATABASE_URL = os.getenv('DATABASE_URL')
 
-def get_ssl_context():
-    """Create SSL context for database connection."""
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-    return ssl_context
-
-DB_CONFIG = {
-    'host': os.getenv('DB_HOST', 'dpg-d4pr99je5dus73eb5730-a.singapore-postgres.render.com'),
-    'port': int(os.getenv('DB_PORT', 5432)),
-    'database': os.getenv('DB_NAME', 'flt_sales_commission_db'),
-    'user': os.getenv('DB_USER', 'flt_sales_commission_db_user'),
-    'password': os.getenv('DB_PASSWORD', 'Wy0ZP1wjLPsIta0YLpYLeRWgdITbya2m'),
-}
+# Fallback configuration using internal hostname for Render
+DB_HOST = os.getenv('DB_HOST', 'dpg-d4pr99je5dus73eb5730.singapore-postgres.render.com')  # Internal (no -a)
+DB_PORT = int(os.getenv('DB_PORT', 5432))
+DB_NAME = os.getenv('DB_NAME', 'flt_sales_commission_db')
+DB_USER = os.getenv('DB_USER', 'flt_sales_commission_db_user')
+DB_PASSWORD = os.getenv('DB_PASSWORD', 'Wy0ZP1wjLPsIta0YLpYLeRWgdITbya2m')
 
 # Global connection pool
 pool: asyncpg.Pool = None
 
 
-async def create_pool_with_retry(max_retries: int = 5, initial_delay: float = 1.0):
+async def create_pool_with_retry(max_retries: int = 5, initial_delay: float = 2.0):
     """Create connection pool with retry logic for Render deployment."""
+    import sys
     delay = initial_delay
     last_error = None
 
     for attempt in range(max_retries):
         try:
-            print(f"Attempting to create database pool (attempt {attempt + 1}/{max_retries})...")
-            created_pool = await asyncpg.create_pool(
-                **DB_CONFIG,
-                ssl=get_ssl_context(),
-                min_size=1,  # Start with 1 connection to reduce initial load
-                max_size=10,
-                command_timeout=60,
-                timeout=30,  # Connection timeout
-            )
-            print("Database pool created successfully!")
+            print(f"Attempting to create database pool (attempt {attempt + 1}/{max_retries})...", flush=True)
+
+            if DATABASE_URL:
+                # Use DATABASE_URL (preferred for Render)
+                print(f"Using DATABASE_URL", flush=True)
+                created_pool = await asyncpg.create_pool(
+                    DATABASE_URL,
+                    min_size=1,
+                    max_size=10,
+                    command_timeout=60,
+                )
+            else:
+                # Use individual parameters with internal hostname
+                print(f"Using individual params, host: {DB_HOST}", flush=True)
+                created_pool = await asyncpg.create_pool(
+                    host=DB_HOST,
+                    port=DB_PORT,
+                    database=DB_NAME,
+                    user=DB_USER,
+                    password=DB_PASSWORD,
+                    ssl='require',
+                    min_size=1,
+                    max_size=10,
+                    command_timeout=60,
+                )
+
+            print("Database pool created successfully!", flush=True)
             return created_pool
         except Exception as e:
             last_error = e
-            print(f"Connection attempt {attempt + 1} failed: {type(e).__name__}: {e}")
+            print(f"Connection attempt {attempt + 1} failed: {type(e).__name__}: {e}", flush=True)
+            sys.stdout.flush()
             if attempt < max_retries - 1:
-                print(f"Retrying in {delay} seconds...")
+                print(f"Retrying in {delay} seconds...", flush=True)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)  # Exponential backoff, max 30 seconds
 
