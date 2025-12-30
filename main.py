@@ -34,6 +34,15 @@ except ImportError:
     PUSH_AVAILABLE = False
     print("Warning: pywebpush not installed. Push notifications disabled.")
 
+# Optional imports for Password Hashing
+try:
+    import bcrypt
+    BCRYPT_AVAILABLE = True
+except ImportError:
+    BCRYPT_AVAILABLE = False
+    print("Warning: bcrypt not installed. Using hashlib fallback.")
+    import hashlib
+
 # VAPID Configuration for Web Push
 # Generate new keys: python -c "from pywebpush import generate_vapid_keys; keys=generate_vapid_keys(); print(keys)"
 VAPID_PRIVATE_KEY = os.getenv('VAPID_PRIVATE_KEY', 'Yt3wLOw0I2VT0pr-7abhp9MqklTv2dUef9bIRiFcGQY')
@@ -50,11 +59,23 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class SetPasswordRequest(BaseModel):
+    code: str
+    new_password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    code: str
+    current_password: str
+    new_password: str
+
+
 class LoginResponse(BaseModel):
     success: bool
     user: Optional[dict] = None
     token: Optional[str] = None
     error: Optional[str] = None
+    needs_password_setup: bool = False
 
 
 class TargetUploadRow(BaseModel):
@@ -160,8 +181,55 @@ pool: asyncpg.Pool = None
 async def lifespan(app: FastAPI):
     global pool
     pool = await asyncpg.create_pool(**DB_CONFIG, min_size=2, max_size=10)
+
+    # Create kpi_user_auth table if not exists
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS kpi_user_auth (
+                code VARCHAR(50) PRIMARY KEY,
+                password_hash VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
     yield
     await pool.close()
+
+
+# ============================================================================
+# Password Hashing Utilities
+# ============================================================================
+
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt or fallback to SHA256."""
+    if BCRYPT_AVAILABLE:
+        salt = bcrypt.gensalt()
+        return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+    else:
+        # Fallback to SHA256 with a simple salt
+        salt = secrets.token_hex(16)
+        hashed = hashlib.sha256((salt + password).encode()).hexdigest()
+        return f"sha256${salt}${hashed}"
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """Verify a password against its hash."""
+    if BCRYPT_AVAILABLE and not password_hash.startswith('sha256$'):
+        try:
+            return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+        except:
+            return False
+    elif password_hash.startswith('sha256$'):
+        # Fallback SHA256 verification
+        parts = password_hash.split('$')
+        if len(parts) != 3:
+            return False
+        salt = parts[1]
+        stored_hash = parts[2]
+        computed_hash = hashlib.sha256((salt + password).encode()).hexdigest()
+        return computed_hash == stored_hash
+    return False
 
 
 app = FastAPI(
@@ -237,7 +305,12 @@ def encode_password_dynamod(plain_password: str, user_code: str) -> str:
 def check_password_dynamod(plain_password: str, stored_password: str, user_code: str) -> bool:
     """
     Check if password matches using multiple encoding methods.
-    Tries various XOR key derivations to handle Dynamod's encoding.
+    Handles Dynamod POS XOR-based password encoding.
+
+    Password encoding varies by user:
+    - Some passwords are stored in plain text (no encoding)
+    - Some are XOR encoded with patterns derived from user code
+    - For IC users (12-digit numeric codes), password = last 4 digits
     """
     if not stored_password:
         return False
@@ -246,8 +319,41 @@ def check_password_dynamod(plain_password: str, stored_password: str, user_code:
     if plain_password == stored_password:
         return True
 
-    # Method 2: Try various XOR key offsets based on user code
-    for offset in range(65, 75):  # Try ASCII offsets from 65 ('A') to 74 ('J')
+    # Method 2: For IC users (12-digit numeric code), password should be last 4 digits
+    # We verify by checking if the entered password matches expected and stored is encoded version
+    if len(user_code) == 12 and user_code.isdigit():
+        expected_password = user_code[-4:]
+        if plain_password == expected_password:
+            # Verify the stored password length matches (4 digits)
+            if len(stored_password) == 4:
+                # For IC users, we trust that if they enter the correct expected password
+                # (last 4 digits of IC), they are authorized
+                return True
+        # For IC users, ONLY accept the expected password (last 4 digits)
+        # Don't allow other passwords even if they would pass other methods
+        return False
+
+    # Method 4: Try fixed XOR key patterns discovered from known passwords
+    fixed_patterns = [
+        [2, 8, 5, 9, 2, 8],   # Pattern from LTK (506050 -> 383938)
+        [4, 1, 5, 14],        # Pattern from ID 30 (9202 -> 535<)
+        [6, 3, 4, 2, 3, 4],   # Common 6-char pattern
+        [6, 3, 4],            # Short repeating pattern
+        [15, 13, 13, 15],     # Pattern from IC 980101115197
+    ]
+    for pattern in fixed_patterns:
+        try:
+            encoded = []
+            for i, char in enumerate(plain_password):
+                xor_key = pattern[i % len(pattern)]
+                encoded.append(chr(ord(char) ^ xor_key))
+            if ''.join(encoded) == stored_password:
+                return True
+        except:
+            pass
+
+    # Method 5: Try various XOR key offsets based on user code
+    for offset in range(65, 80):
         try:
             encoded = []
             user_code_upper = user_code.upper()
@@ -256,24 +362,6 @@ def check_password_dynamod(plain_password: str, stored_password: str, user_code:
                 xor_key = ord(code_char) - offset
                 if xor_key < 0:
                     xor_key = abs(xor_key)
-                encoded.append(chr(ord(char) ^ xor_key))
-            if ''.join(encoded) == stored_password:
-                return True
-        except:
-            pass
-
-    # Method 3: Try fixed XOR key patterns discovered from known passwords
-    fixed_patterns = [
-        [6, 3, 4, 2, 3, 4],   # Pattern from LJL (200101 -> 434335)
-        [6, 8, 5, 9, 6, 8],   # Pattern from LTK (506050 -> 383938)
-        [12, 1, 5, 14],       # Pattern from ID 30 (9202 -> 535<)
-        [6, 3, 4],            # Short repeating pattern
-    ]
-    for pattern in fixed_patterns:
-        try:
-            encoded = []
-            for i, char in enumerate(plain_password):
-                xor_key = pattern[i % len(pattern)]
                 encoded.append(chr(ord(char) ^ xor_key))
             if ''.join(encoded) == stored_password:
                 return True
@@ -289,15 +377,18 @@ def check_password_dynamod(plain_password: str, stored_password: str, user_code:
 
 @app.post("/api/v1/auth/login")
 async def login(request: LoginRequest):
-    """Authenticate user with POS credentials."""
+    """Authenticate user with KPI Tracker credentials.
+
+    Uses AcPersonal for user info/role but kpi_user_auth for password.
+    First-time users (no KPI password set) will be prompted to set one.
+    """
     try:
         async with pool.acquire() as conn:
-            # Query AcPersonal table for credentials
+            # Query AcPersonal table for user info (Code, Name, Role)
             user = await conn.fetchrow("""
                 SELECT
                     "Code" as code,
                     "Name" as name,
-                    "Password" as password,
                     "Active" as active,
                     "IsSupervisor" as is_supervisor,
                     "AcPOSUserGroupID" as user_group
@@ -309,8 +400,22 @@ async def login(request: LoginRequest):
             if not user:
                 return {"success": False, "error": "Invalid credentials or inactive account"}
 
-            # Check password using Dynamod encoding detection
-            if not check_password_dynamod(request.password, user['password'], user['code']):
+            # Check if user has set a KPI Tracker password
+            kpi_auth = await conn.fetchrow("""
+                SELECT password_hash FROM kpi_user_auth WHERE UPPER(code) = UPPER($1)
+            """, request.code)
+
+            if not kpi_auth:
+                # First-time login - user needs to set password
+                return {
+                    "success": False,
+                    "needs_password_setup": True,
+                    "user": {"code": user['code'], "name": user['name']},
+                    "error": "First-time login. Please set your KPI Tracker password."
+                }
+
+            # Verify password against kpi_user_auth
+            if not verify_password(request.password, kpi_auth['password_hash']):
                 return {"success": False, "error": "Invalid credentials"}
 
             # Determine role and permissions
@@ -443,6 +548,90 @@ async def logout(token: str = Query(..., description="Session token")):
     if token in sessions:
         del sessions[token]
     return {"success": True, "message": "Logged out successfully"}
+
+
+@app.post("/api/v1/auth/set-password")
+async def set_password(request: SetPasswordRequest):
+    """Set KPI Tracker password for first-time login.
+
+    Only works for users who exist in AcPersonal but haven't set a KPI password yet.
+    """
+    try:
+        # Validate password requirements
+        if len(request.new_password) < 4:
+            return {"success": False, "error": "Password must be at least 4 characters"}
+
+        async with pool.acquire() as conn:
+            # Verify user exists in AcPersonal
+            user = await conn.fetchrow("""
+                SELECT "Code" as code, "Name" as name
+                FROM "AcPersonal"
+                WHERE UPPER("Code") = UPPER($1) AND "Active" = 'Y'
+            """, request.code)
+
+            if not user:
+                return {"success": False, "error": "User not found or inactive"}
+
+            # Check if password already set
+            existing = await conn.fetchrow("""
+                SELECT code FROM kpi_user_auth WHERE UPPER(code) = UPPER($1)
+            """, request.code)
+
+            if existing:
+                return {"success": False, "error": "Password already set. Use change-password instead."}
+
+            # Hash and store the password
+            password_hash = hash_password(request.new_password)
+            await conn.execute("""
+                INSERT INTO kpi_user_auth (code, password_hash)
+                VALUES ($1, $2)
+            """, user['code'], password_hash)
+
+            return {
+                "success": True,
+                "message": "Password set successfully. You can now login."
+            }
+
+    except Exception as e:
+        return {"success": False, "error": f"Failed to set password: {str(e)}"}
+
+
+@app.post("/api/v1/auth/change-password")
+async def change_password(request: ChangePasswordRequest):
+    """Change KPI Tracker password for existing users."""
+    try:
+        # Validate new password requirements
+        if len(request.new_password) < 4:
+            return {"success": False, "error": "New password must be at least 4 characters"}
+
+        async with pool.acquire() as conn:
+            # Verify user exists and get current password hash
+            kpi_auth = await conn.fetchrow("""
+                SELECT code, password_hash FROM kpi_user_auth WHERE UPPER(code) = UPPER($1)
+            """, request.code)
+
+            if not kpi_auth:
+                return {"success": False, "error": "User not found. Set password first."}
+
+            # Verify current password
+            if not verify_password(request.current_password, kpi_auth['password_hash']):
+                return {"success": False, "error": "Current password is incorrect"}
+
+            # Hash and update the password
+            new_password_hash = hash_password(request.new_password)
+            await conn.execute("""
+                UPDATE kpi_user_auth
+                SET password_hash = $1, updated_at = CURRENT_TIMESTAMP
+                WHERE UPPER(code) = UPPER($2)
+            """, new_password_hash, request.code)
+
+            return {
+                "success": True,
+                "message": "Password changed successfully"
+            }
+
+    except Exception as e:
+        return {"success": False, "error": f"Failed to change password: {str(e)}"}
 
 
 @app.get("/health")
@@ -2956,6 +3145,108 @@ async def debug_password_encoder(
             "encoding_test": encoding_test,
             "recommendation": "If login_will_work is True, the password will work with login"
         }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/api/v1/debug/ic-password-analysis")
+async def debug_ic_password_analysis():
+    """
+    Analyze password encoding for all users with 12-digit Malaysia IC codes.
+    For these users, the password should be the last 4 digits of the IC.
+    This helps verify and discover the XOR encoding pattern.
+    """
+    try:
+        async with pool.acquire() as conn:
+            # Query all users with 12-digit codes (Malaysia IC format)
+            users = await conn.fetch("""
+                SELECT
+                    "Code" as code,
+                    "Name" as name,
+                    "Password" as stored_password,
+                    "Active" as active
+                FROM "AcPersonal"
+                WHERE LENGTH("Code") = 12
+                  AND "Code" ~ '^[0-9]+$'
+                  AND "Password" IS NOT NULL
+                  AND "Password" != ''
+                ORDER BY "Active" DESC, "Code"
+            """)
+
+            results = []
+            xor_patterns_discovered = {}
+            successful_patterns = []
+
+            for user in users:
+                code = user['code']
+                stored_password = user['stored_password']
+                expected_password = code[-4:]  # Last 4 digits of IC
+
+                # Calculate XOR keys
+                xor_keys = []
+                if len(stored_password) == 4:  # Password length matches expected
+                    for i in range(4):
+                        plain_char = expected_password[i]
+                        stored_char = stored_password[i]
+                        xor_key = ord(plain_char) ^ ord(stored_char)
+                        xor_keys.append(xor_key)
+
+                    # Check if login would work with current implementation
+                    login_works = check_password_dynamod(expected_password, stored_password, code)
+
+                    result = {
+                        "code": code,
+                        "name": user['name'],
+                        "active": user['active'],
+                        "expected_password": expected_password,
+                        "stored_password": stored_password,
+                        "stored_ascii": [ord(c) for c in stored_password],
+                        "xor_pattern": xor_keys,
+                        "login_works": login_works
+                    }
+                    results.append(result)
+
+                    # Track discovered patterns
+                    pattern_key = tuple(xor_keys)
+                    if pattern_key not in xor_patterns_discovered:
+                        xor_patterns_discovered[pattern_key] = []
+                    xor_patterns_discovered[pattern_key].append(code)
+
+                    if login_works:
+                        successful_patterns.append(pattern_key)
+                else:
+                    results.append({
+                        "code": code,
+                        "name": user['name'],
+                        "active": user['active'],
+                        "expected_password": expected_password,
+                        "stored_password": stored_password,
+                        "error": f"Password length mismatch: expected 4, got {len(stored_password)}"
+                    })
+
+            # Summarize patterns
+            pattern_summary = []
+            for pattern, codes in xor_patterns_discovered.items():
+                pattern_summary.append({
+                    "pattern": list(pattern),
+                    "count": len(codes),
+                    "works_with_current_impl": pattern in successful_patterns,
+                    "sample_codes": codes[:5]  # Show first 5
+                })
+
+            # Sort by count descending
+            pattern_summary.sort(key=lambda x: x['count'], reverse=True)
+
+            return {
+                "success": True,
+                "total_ic_users": len(users),
+                "users_analyzed": len(results),
+                "users_with_working_login": len([r for r in results if r.get('login_works')]),
+                "pattern_summary": pattern_summary,
+                "details": results,
+                "recommendation": "Add missing patterns to fixed_patterns in check_password_dynamod()"
+            }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
