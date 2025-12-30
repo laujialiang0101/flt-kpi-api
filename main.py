@@ -1278,6 +1278,312 @@ async def export_team_performance(
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
 
+@app.get("/api/v1/kpi/outlets")
+async def get_outlet_performance(
+    outlet_ids: Optional[str] = Query(None, description="Comma-separated list of outlet IDs (empty for all)"),
+    start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End date YYYY-MM-DD")
+):
+    """Get performance summary for each outlet.
+
+    Returns KPI metrics aggregated per outlet for comparison.
+    """
+    # Parse dates
+    today = date.today()
+    if start_date:
+        try:
+            start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        except:
+            start = date(today.year, today.month, 1)
+    else:
+        start = date(today.year, today.month, 1)
+
+    if end_date:
+        try:
+            end = datetime.strptime(end_date, "%Y-%m-%d").date()
+        except:
+            end = today
+    else:
+        end = today
+
+    outlet_list = [o.strip() for o in outlet_ids.split(',')] if outlet_ids else None
+
+    try:
+        async with pool.acquire() as conn:
+            if outlet_list:
+                outlets = await conn.fetch("""
+                    SELECT
+                        k.outlet_id,
+                        l."AcLocationDesc" as outlet_name,
+                        COUNT(DISTINCT k.staff_id) as staff_count,
+                        COALESCE(SUM(k.transactions), 0) as transactions,
+                        COALESCE(SUM(k.total_sales), 0) as total_sales,
+                        COALESCE(SUM(k.gross_profit), 0) as gross_profit,
+                        COALESCE(SUM(k.house_brand_sales), 0) as house_brand,
+                        COALESCE(SUM(k.focused_1_sales), 0) as focused_1,
+                        COALESCE(SUM(k.focused_2_sales), 0) as focused_2,
+                        COALESCE(SUM(k.focused_3_sales), 0) as focused_3,
+                        COALESCE(SUM(k.pwp_sales), 0) as pwp,
+                        COALESCE(SUM(k.clearance_sales), 0) as clearance
+                    FROM analytics.mv_outlet_daily_kpi k
+                    LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
+                    WHERE k.sale_date BETWEEN $1 AND $2
+                      AND k.outlet_id = ANY($3)
+                    GROUP BY k.outlet_id, l."AcLocationDesc"
+                    ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
+                """, start, end, outlet_list)
+            else:
+                outlets = await conn.fetch("""
+                    SELECT
+                        k.outlet_id,
+                        l."AcLocationDesc" as outlet_name,
+                        COUNT(DISTINCT k.staff_id) as staff_count,
+                        COALESCE(SUM(k.transactions), 0) as transactions,
+                        COALESCE(SUM(k.total_sales), 0) as total_sales,
+                        COALESCE(SUM(k.gross_profit), 0) as gross_profit,
+                        COALESCE(SUM(k.house_brand_sales), 0) as house_brand,
+                        COALESCE(SUM(k.focused_1_sales), 0) as focused_1,
+                        COALESCE(SUM(k.focused_2_sales), 0) as focused_2,
+                        COALESCE(SUM(k.focused_3_sales), 0) as focused_3,
+                        COALESCE(SUM(k.pwp_sales), 0) as pwp,
+                        COALESCE(SUM(k.clearance_sales), 0) as clearance
+                    FROM analytics.mv_outlet_daily_kpi k
+                    LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
+                    WHERE k.sale_date BETWEEN $1 AND $2
+                    GROUP BY k.outlet_id, l."AcLocationDesc"
+                    ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
+                """, start, end)
+
+            # Calculate totals
+            total_sales = sum(float(o['total_sales'] or 0) for o in outlets)
+            total_gp = sum(float(o['gross_profit'] or 0) for o in outlets)
+            total_hb = sum(float(o['house_brand'] or 0) for o in outlets)
+            total_f1 = sum(float(o['focused_1'] or 0) for o in outlets)
+            total_f2 = sum(float(o['focused_2'] or 0) for o in outlets)
+            total_f3 = sum(float(o['focused_3'] or 0) for o in outlets)
+            total_pwp = sum(float(o['pwp'] or 0) for o in outlets)
+            total_clearance = sum(float(o['clearance'] or 0) for o in outlets)
+            total_txn = sum(int(o['transactions'] or 0) for o in outlets)
+            total_staff = sum(int(o['staff_count'] or 0) for o in outlets)
+
+            return {
+                "success": True,
+                "data": {
+                    "period": {"start": start.isoformat(), "end": end.isoformat()},
+                    "summary": {
+                        "outlet_count": len(outlets),
+                        "staff_count": total_staff,
+                        "total_sales": round(total_sales, 2),
+                        "gross_profit": round(total_gp, 2),
+                        "house_brand": round(total_hb, 2),
+                        "focused_1": round(total_f1, 2),
+                        "focused_2": round(total_f2, 2),
+                        "focused_3": round(total_f3, 2),
+                        "pwp": round(total_pwp, 2),
+                        "clearance": round(total_clearance, 2),
+                        "transactions": total_txn
+                    },
+                    "outlets": [
+                        {
+                            "outlet_id": o['outlet_id'],
+                            "outlet_name": o['outlet_name'] or o['outlet_id'],
+                            "staff_count": int(o['staff_count'] or 0),
+                            "total_sales": round(float(o['total_sales'] or 0), 2),
+                            "gross_profit": round(float(o['gross_profit'] or 0), 2),
+                            "house_brand": round(float(o['house_brand'] or 0), 2),
+                            "focused_1": round(float(o['focused_1'] or 0), 2),
+                            "focused_2": round(float(o['focused_2'] or 0), 2),
+                            "focused_3": round(float(o['focused_3'] or 0), 2),
+                            "pwp": round(float(o['pwp'] or 0), 2),
+                            "clearance": round(float(o['clearance'] or 0), 2),
+                            "transactions": int(o['transactions'] or 0),
+                            "rank": idx + 1
+                        }
+                        for idx, o in enumerate(outlets)
+                    ]
+                }
+            }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching outlet performance: {str(e)}")
+
+
+@app.get("/api/v1/kpi/outlets/export")
+async def export_outlet_performance(
+    outlet_ids: Optional[str] = Query(None, description="Comma-separated list of outlet IDs (empty for all)"),
+    start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End date YYYY-MM-DD")
+):
+    """Export outlet performance to Excel file."""
+    if not EXCEL_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Excel export not available - openpyxl not installed")
+
+    # Parse dates
+    today = date.today()
+    if start_date:
+        try:
+            start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        except:
+            start = date(today.year, today.month, 1)
+    else:
+        start = date(today.year, today.month, 1)
+
+    if end_date:
+        try:
+            end = datetime.strptime(end_date, "%Y-%m-%d").date()
+        except:
+            end = today
+    else:
+        end = today
+
+    outlet_list = [o.strip() for o in outlet_ids.split(',')] if outlet_ids else None
+
+    try:
+        async with pool.acquire() as conn:
+            if outlet_list:
+                outlets = await conn.fetch("""
+                    SELECT
+                        k.outlet_id,
+                        l."AcLocationDesc" as outlet_name,
+                        COUNT(DISTINCT k.staff_id) as staff_count,
+                        COALESCE(SUM(k.transactions), 0) as transactions,
+                        COALESCE(SUM(k.total_sales), 0) as total_sales,
+                        COALESCE(SUM(k.gross_profit), 0) as gross_profit,
+                        COALESCE(SUM(k.house_brand_sales), 0) as house_brand,
+                        COALESCE(SUM(k.focused_1_sales), 0) as focused_1,
+                        COALESCE(SUM(k.focused_2_sales), 0) as focused_2,
+                        COALESCE(SUM(k.focused_3_sales), 0) as focused_3,
+                        COALESCE(SUM(k.pwp_sales), 0) as pwp,
+                        COALESCE(SUM(k.clearance_sales), 0) as clearance
+                    FROM analytics.mv_outlet_daily_kpi k
+                    LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
+                    WHERE k.sale_date BETWEEN $1 AND $2
+                      AND k.outlet_id = ANY($3)
+                    GROUP BY k.outlet_id, l."AcLocationDesc"
+                    ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
+                """, start, end, outlet_list)
+            else:
+                outlets = await conn.fetch("""
+                    SELECT
+                        k.outlet_id,
+                        l."AcLocationDesc" as outlet_name,
+                        COUNT(DISTINCT k.staff_id) as staff_count,
+                        COALESCE(SUM(k.transactions), 0) as transactions,
+                        COALESCE(SUM(k.total_sales), 0) as total_sales,
+                        COALESCE(SUM(k.gross_profit), 0) as gross_profit,
+                        COALESCE(SUM(k.house_brand_sales), 0) as house_brand,
+                        COALESCE(SUM(k.focused_1_sales), 0) as focused_1,
+                        COALESCE(SUM(k.focused_2_sales), 0) as focused_2,
+                        COALESCE(SUM(k.focused_3_sales), 0) as focused_3,
+                        COALESCE(SUM(k.pwp_sales), 0) as pwp,
+                        COALESCE(SUM(k.clearance_sales), 0) as clearance
+                    FROM analytics.mv_outlet_daily_kpi k
+                    LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
+                    WHERE k.sale_date BETWEEN $1 AND $2
+                    GROUP BY k.outlet_id, l."AcLocationDesc"
+                    ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
+                """, start, end)
+
+        # Create Excel workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Outlet Performance"
+
+        # Header row
+        headers = [
+            "Rank", "Outlet ID", "Outlet Name", "Staff Count",
+            "Total Sales", "Gross Profit", "House Brand",
+            "Focused 1", "Focused 2", "Focused 3",
+            "PWP", "Clearance", "Transactions"
+        ]
+        ws.append(headers)
+
+        # Style headers
+        from openpyxl.styles import Font, PatternFill
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+        for cell in ws[1]:
+            cell.font = header_font
+            cell.fill = header_fill
+
+        # Data rows
+        for idx, row in enumerate(outlets):
+            ws.append([
+                idx + 1,
+                row['outlet_id'],
+                row['outlet_name'] or row['outlet_id'],
+                int(row['staff_count'] or 0),
+                round(float(row['total_sales'] or 0), 2),
+                round(float(row['gross_profit'] or 0), 2),
+                round(float(row['house_brand'] or 0), 2),
+                round(float(row['focused_1'] or 0), 2),
+                round(float(row['focused_2'] or 0), 2),
+                round(float(row['focused_3'] or 0), 2),
+                round(float(row['pwp'] or 0), 2),
+                round(float(row['clearance'] or 0), 2),
+                int(row['transactions'] or 0)
+            ])
+
+        # Add totals row
+        total_row = [
+            "",
+            "TOTAL",
+            f"{len(outlets)} outlets",
+            sum(int(o['staff_count'] or 0) for o in outlets),
+            round(sum(float(o['total_sales'] or 0) for o in outlets), 2),
+            round(sum(float(o['gross_profit'] or 0) for o in outlets), 2),
+            round(sum(float(o['house_brand'] or 0) for o in outlets), 2),
+            round(sum(float(o['focused_1'] or 0) for o in outlets), 2),
+            round(sum(float(o['focused_2'] or 0) for o in outlets), 2),
+            round(sum(float(o['focused_3'] or 0) for o in outlets), 2),
+            round(sum(float(o['pwp'] or 0) for o in outlets), 2),
+            round(sum(float(o['clearance'] or 0) for o in outlets), 2),
+            sum(int(o['transactions'] or 0) for o in outlets)
+        ]
+        ws.append(total_row)
+
+        # Style totals row
+        total_font = Font(bold=True)
+        for cell in ws[ws.max_row]:
+            cell.font = total_font
+
+        # Auto-adjust column widths
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 30)
+            ws.column_dimensions[column_letter].width = adjusted_width
+
+        # Format number columns
+        from openpyxl.styles.numbers import FORMAT_NUMBER_COMMA_SEPARATED1
+        for row in ws.iter_rows(min_row=2, min_col=5, max_col=12):
+            for cell in row:
+                cell.number_format = '#,##0.00'
+
+        # Save to buffer
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        # Generate filename
+        filename = f"outlet_performance_{start.strftime('%Y%m%d')}_{end.strftime('%Y%m%d')}.xlsx"
+
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+
 # ============================================================================
 # Target Management Endpoints
 # ============================================================================
@@ -2400,6 +2706,486 @@ async def debug_sales_breakdown(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+def decode_dynamod_password(encoded: str) -> str:
+    """
+    Attempt to decode Dynamod password encoding.
+
+    Dynamod uses a simple XOR-based obfuscation where each character is XORed
+    with a position-dependent key. Based on analysis:
+    - The encoding XORs each character with a value that varies by position
+    - This function attempts to reverse the encoding
+    """
+    if not encoded:
+        return ""
+
+    # Try multiple decoding approaches
+    decoded_attempts = []
+
+    # Approach 1: Try XOR with common patterns
+    # Based on observed patterns, try different XOR key sequences
+    xor_patterns = [
+        [6, 3, 4, 2, 3, 4],  # Pattern observed for some passwords
+        [6, 8, 5, 9, 6, 8],  # Another observed pattern
+        [2, 3, 4, 2, 3, 4],  # Simple repeating
+    ]
+
+    for pattern in xor_patterns:
+        try:
+            decoded = ""
+            for i, char in enumerate(encoded):
+                key = pattern[i % len(pattern)]
+                decoded_char = chr(ord(char) ^ key)
+                decoded += decoded_char
+            if decoded.isdigit() or decoded.isalnum():
+                decoded_attempts.append({"method": f"XOR pattern {pattern}", "result": decoded})
+        except:
+            pass
+
+    # Approach 2: Simple character shift (Caesar-like)
+    for shift in range(-10, 11):
+        try:
+            decoded = "".join(chr(ord(c) + shift) for c in encoded)
+            if decoded.isdigit():
+                decoded_attempts.append({"method": f"Shift {shift}", "result": decoded})
+        except:
+            pass
+
+    return decoded_attempts
+
+
+@app.get("/api/v1/debug/user-credentials")
+async def debug_user_credentials(
+    code: str = Query(..., description="User code to check (e.g., 'LJL', '30', 'LTK')")
+):
+    """Debug endpoint to check what credentials are stored in AcPersonal table.
+
+    IMPORTANT: This endpoint is for debugging only. It shows the stored password
+    from the AcPersonal table which is synced from Dynamod SQL Server.
+    """
+    try:
+        async with pool.acquire() as conn:
+            # Get user from AcPersonal
+            user = await conn.fetchrow("""
+                SELECT
+                    "Code" as code,
+                    "Name" as name,
+                    "Password" as password,
+                    "Active" as active,
+                    "IsSupervisor" as is_supervisor,
+                    "AcPOSUserGroupID" as user_group
+                FROM "AcPersonal"
+                WHERE UPPER("Code") = UPPER($1)
+            """, code)
+
+            if not user:
+                return {
+                    "success": False,
+                    "error": f"User '{code}' not found in AcPersonal table"
+                }
+
+            stored_password = user['password'] or ""
+
+            # Try to decode the password
+            decode_attempts = decode_dynamod_password(stored_password)
+
+            return {
+                "success": True,
+                "message": "Password retrieved from AcPersonal table (synced from Dynamod)",
+                "user": {
+                    "code": user['code'],
+                    "name": user['name'],
+                    "stored_password": stored_password,
+                    "stored_password_bytes": [ord(c) for c in stored_password],  # Show ASCII values
+                    "active": user['active'],
+                    "is_supervisor": user['is_supervisor'],
+                    "user_group": user['user_group']
+                },
+                "decode_attempts": decode_attempts,
+                "encoding_analysis": {
+                    "length": len(stored_password),
+                    "char_codes": [f"{c} (ASCII {ord(c)})" for c in stored_password]
+                },
+                "note": "The password is ENCODED. Use /api/v1/debug/password-encoder to test encoding."
+            }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/api/v1/debug/password-encoder")
+async def debug_password_encoder(
+    plain_password: str = Query(..., description="Plain text password to encode"),
+    stored_password: str = Query(..., description="Known stored/encoded password")
+):
+    """
+    Debug endpoint to figure out the password encoding by comparing plain and stored passwords.
+
+    Provide a known plain password and its stored/encoded version to reverse-engineer the encoding.
+    """
+    try:
+        if len(plain_password) != len(stored_password):
+            return {
+                "success": False,
+                "error": f"Length mismatch: plain={len(plain_password)}, stored={len(stored_password)}",
+                "hint": "Passwords should be same length if directly encoded"
+            }
+
+        # Calculate XOR keys for each position
+        xor_keys = []
+        for i, (p, s) in enumerate(zip(plain_password, stored_password)):
+            xor_key = ord(p) ^ ord(s)
+            xor_keys.append({
+                "position": i,
+                "plain_char": p,
+                "plain_ascii": ord(p),
+                "stored_char": s,
+                "stored_ascii": ord(s),
+                "xor_key": xor_key
+            })
+
+        # Check if there's a repeating pattern in XOR keys
+        key_values = [k["xor_key"] for k in xor_keys]
+
+        # Try to find repeating pattern
+        patterns_found = []
+        for pattern_len in range(1, len(key_values) // 2 + 1):
+            pattern = key_values[:pattern_len]
+            is_repeating = True
+            for i in range(len(key_values)):
+                if key_values[i] != pattern[i % pattern_len]:
+                    is_repeating = False
+                    break
+            if is_repeating:
+                patterns_found.append(pattern)
+
+        return {
+            "success": True,
+            "analysis": {
+                "plain_password": plain_password,
+                "stored_password": stored_password,
+                "xor_keys": xor_keys,
+                "key_pattern": key_values,
+                "repeating_patterns": patterns_found if patterns_found else "No repeating pattern found"
+            },
+            "recommendation": "Use the XOR keys to decode other passwords"
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# ============================================================================
+# Outlet Targets Endpoints (Team-level targets)
+# ============================================================================
+
+@app.get("/api/v1/outlet-targets/template")
+async def download_outlet_target_template():
+    """Download Excel template for outlet target upload."""
+    if not EXCEL_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Excel support not available. Install openpyxl.")
+
+    try:
+        async with pool.acquire() as conn:
+            # Get all outlets
+            outlets = await conn.fetch("""
+                SELECT "AcLocationID" as id, "AcLocationDesc" as name
+                FROM "AcLocation"
+                WHERE "Active" = 'Y'
+                ORDER BY "AcLocationID"
+            """)
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Outlet Targets"
+
+        # Headers
+        headers = [
+            'outlet_id', 'outlet_name', 'year_month',
+            'total_sales', 'house_brand', 'focused_1', 'focused_2', 'focused_3',
+            'pwp', 'clearance', 'transactions'
+        ]
+        for col, header in enumerate(headers, 1):
+            ws.cell(row=1, column=col, value=header)
+
+        # Pre-fill with outlet data and current month
+        current_month = int(datetime.now().strftime('%Y%m'))
+        for row, outlet in enumerate(outlets, 2):
+            ws.cell(row=row, column=1, value=outlet['id'])
+            ws.cell(row=row, column=2, value=outlet['name'])
+            ws.cell(row=row, column=3, value=current_month)
+            # Leave target columns empty for user to fill
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=outlet_target_template.xlsx"}
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating template: {str(e)}")
+
+
+@app.post("/api/v1/outlet-targets/upload")
+async def upload_outlet_targets(
+    file: UploadFile = File(...),
+    token: str = Query(..., description="Session token")
+):
+    """Upload outlet targets from Excel file (Admin/Operations Manager only)."""
+    # Verify session and permissions
+    if token not in sessions:
+        raise HTTPException(status_code=401, detail="Invalid session")
+
+    user = sessions[token]['user']
+    if not user['permissions'].get('can_upload_targets'):
+        raise HTTPException(status_code=403, detail="Permission denied. Only Admin/Operations Manager can upload targets.")
+
+    if not EXCEL_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Excel support not available. Install openpyxl.")
+
+    try:
+        # Read Excel file
+        content = await file.read()
+        wb = openpyxl.load_workbook(io.BytesIO(content))
+        ws = wb.active
+
+        rows_processed = 0
+        errors = []
+
+        async with pool.acquire() as conn:
+            # Ensure OutletTargets table exists
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS "OutletTargets" (
+                    outlet_id VARCHAR(20) NOT NULL,
+                    year_month INT NOT NULL,
+                    total_sales_target DECIMAL(15,2) DEFAULT 0,
+                    house_brand_target DECIMAL(15,2) DEFAULT 0,
+                    focused_item_1_target DECIMAL(15,2) DEFAULT 0,
+                    focused_item_2_target DECIMAL(15,2) DEFAULT 0,
+                    focused_item_3_target DECIMAL(15,2) DEFAULT 0,
+                    pwp_target DECIMAL(15,2) DEFAULT 0,
+                    stock_clearance_target DECIMAL(15,2) DEFAULT 0,
+                    transaction_count_target INT DEFAULT 0,
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    updated_by VARCHAR(20),
+                    PRIMARY KEY (outlet_id, year_month)
+                )
+            """)
+
+            # Process rows (skip header)
+            for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+                if not row[0]:  # Skip empty rows
+                    continue
+
+                try:
+                    outlet_id = str(row[0]).strip()
+                    # Skip outlet_name column (index 1)
+                    year_month = int(row[2] or 0)
+                    total_sales = float(row[3] or 0)
+                    house_brand = float(row[4] or 0)
+                    focused_1 = float(row[5] or 0)
+                    focused_2 = float(row[6] or 0)
+                    focused_3 = float(row[7] or 0)
+                    pwp = float(row[8] or 0)
+                    clearance = float(row[9] or 0)
+                    transactions = int(row[10] or 0)
+
+                    if year_month < 202401 or year_month > 203012:
+                        errors.append(f"Row {row_num}: Invalid year_month {year_month}")
+                        continue
+
+                    # Upsert outlet target
+                    await conn.execute("""
+                        INSERT INTO "OutletTargets" (
+                            outlet_id, year_month, total_sales_target, house_brand_target,
+                            focused_item_1_target, focused_item_2_target, focused_item_3_target,
+                            pwp_target, stock_clearance_target, transaction_count_target,
+                            updated_at, updated_by
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11)
+                        ON CONFLICT (outlet_id, year_month)
+                        DO UPDATE SET
+                            total_sales_target = EXCLUDED.total_sales_target,
+                            house_brand_target = EXCLUDED.house_brand_target,
+                            focused_item_1_target = EXCLUDED.focused_item_1_target,
+                            focused_item_2_target = EXCLUDED.focused_item_2_target,
+                            focused_item_3_target = EXCLUDED.focused_item_3_target,
+                            pwp_target = EXCLUDED.pwp_target,
+                            stock_clearance_target = EXCLUDED.stock_clearance_target,
+                            transaction_count_target = EXCLUDED.transaction_count_target,
+                            updated_at = NOW(),
+                            updated_by = EXCLUDED.updated_by
+                    """, outlet_id, year_month, total_sales, house_brand, focused_1,
+                        focused_2, focused_3, pwp, clearance, transactions, user['code'])
+
+                    rows_processed += 1
+
+                except Exception as row_error:
+                    errors.append(f"Row {row_num}: {str(row_error)}")
+
+        return {
+            "success": True,
+            "rows_processed": rows_processed,
+            "errors": errors if errors else None
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@app.get("/api/v1/outlet-targets")
+async def get_outlet_targets(
+    outlet_id: Optional[str] = Query(None, description="Outlet ID (empty for all)"),
+    outlet_ids: Optional[str] = Query(None, description="Comma-separated outlet IDs"),
+    month: Optional[str] = Query(None, description="Month in YYYY-MM format")
+):
+    """Get outlet targets with current progress."""
+    if month:
+        try:
+            period = datetime.strptime(month, "%Y-%m")
+        except:
+            raise HTTPException(status_code=400, detail="Invalid month format. Use YYYY-MM")
+    else:
+        period = datetime.now()
+
+    year_month = int(period.strftime("%Y%m"))
+    start_date = period.replace(day=1).date()
+    if period.month == 12:
+        end_date = period.replace(year=period.year+1, month=1, day=1).date() - timedelta(days=1)
+    else:
+        end_date = period.replace(month=period.month+1, day=1).date() - timedelta(days=1)
+
+    try:
+        async with pool.acquire() as conn:
+            # Build outlet filter
+            outlet_list = None
+            if outlet_ids:
+                outlet_list = [o.strip() for o in outlet_ids.split(',') if o.strip()]
+            elif outlet_id:
+                outlet_list = [outlet_id]
+
+            # Get targets
+            if outlet_list:
+                targets = await conn.fetch("""
+                    SELECT outlet_id, total_sales_target, house_brand_target,
+                           focused_item_1_target, focused_item_2_target, focused_item_3_target,
+                           pwp_target, stock_clearance_target, transaction_count_target
+                    FROM "OutletTargets"
+                    WHERE outlet_id = ANY($1) AND year_month = $2
+                """, outlet_list, year_month)
+
+                # Get current performance
+                current = await conn.fetchrow("""
+                    SELECT
+                        COALESCE(SUM(total_sales), 0) as total_sales,
+                        COALESCE(SUM(house_brand_sales), 0) as house_brand,
+                        COALESCE(SUM(focused_1_sales), 0) as focused_1,
+                        COALESCE(SUM(focused_2_sales), 0) as focused_2,
+                        COALESCE(SUM(focused_3_sales), 0) as focused_3,
+                        COALESCE(SUM(pwp_sales), 0) as pwp,
+                        COALESCE(SUM(clearance_sales), 0) as clearance,
+                        COALESCE(SUM(transactions), 0) as transactions
+                    FROM analytics.mv_outlet_daily_kpi
+                    WHERE outlet_id = ANY($1)
+                      AND sale_date BETWEEN $2 AND $3
+                """, outlet_list, start_date, end_date)
+            else:
+                # All outlets
+                targets = await conn.fetch("""
+                    SELECT outlet_id, total_sales_target, house_brand_target,
+                           focused_item_1_target, focused_item_2_target, focused_item_3_target,
+                           pwp_target, stock_clearance_target, transaction_count_target
+                    FROM "OutletTargets"
+                    WHERE year_month = $1
+                """, year_month)
+
+                current = await conn.fetchrow("""
+                    SELECT
+                        COALESCE(SUM(total_sales), 0) as total_sales,
+                        COALESCE(SUM(house_brand_sales), 0) as house_brand,
+                        COALESCE(SUM(focused_1_sales), 0) as focused_1,
+                        COALESCE(SUM(focused_2_sales), 0) as focused_2,
+                        COALESCE(SUM(focused_3_sales), 0) as focused_3,
+                        COALESCE(SUM(pwp_sales), 0) as pwp,
+                        COALESCE(SUM(clearance_sales), 0) as clearance,
+                        COALESCE(SUM(transactions), 0) as transactions
+                    FROM analytics.mv_outlet_daily_kpi
+                    WHERE sale_date BETWEEN $1 AND $2
+                """, start_date, end_date)
+
+            # Sum up all targets
+            total_target = {
+                'total_sales': sum(float(t['total_sales_target'] or 0) for t in targets),
+                'house_brand': sum(float(t['house_brand_target'] or 0) for t in targets),
+                'focused_1': sum(float(t['focused_item_1_target'] or 0) for t in targets),
+                'focused_2': sum(float(t['focused_item_2_target'] or 0) for t in targets),
+                'focused_3': sum(float(t['focused_item_3_target'] or 0) for t in targets),
+                'pwp': sum(float(t['pwp_target'] or 0) for t in targets),
+                'clearance': sum(float(t['stock_clearance_target'] or 0) for t in targets),
+                'transactions': sum(int(t['transaction_count_target'] or 0) for t in targets)
+            }
+
+            def calc_progress(current_val, target_val):
+                if not target_val or target_val == 0:
+                    return None
+                return round((float(current_val or 0) / float(target_val)) * 100, 1)
+
+            result = {
+                "total_sales": {
+                    "target": total_target['total_sales'],
+                    "current": float(current['total_sales'] or 0) if current else 0,
+                    "progress": calc_progress(current['total_sales'] if current else 0, total_target['total_sales'])
+                },
+                "house_brand": {
+                    "target": total_target['house_brand'],
+                    "current": float(current['house_brand'] or 0) if current else 0,
+                    "progress": calc_progress(current['house_brand'] if current else 0, total_target['house_brand'])
+                },
+                "focused_1": {
+                    "target": total_target['focused_1'],
+                    "current": float(current['focused_1'] or 0) if current else 0,
+                    "progress": calc_progress(current['focused_1'] if current else 0, total_target['focused_1'])
+                },
+                "focused_2": {
+                    "target": total_target['focused_2'],
+                    "current": float(current['focused_2'] or 0) if current else 0,
+                    "progress": calc_progress(current['focused_2'] if current else 0, total_target['focused_2'])
+                },
+                "focused_3": {
+                    "target": total_target['focused_3'],
+                    "current": float(current['focused_3'] or 0) if current else 0,
+                    "progress": calc_progress(current['focused_3'] if current else 0, total_target['focused_3'])
+                },
+                "pwp": {
+                    "target": total_target['pwp'],
+                    "current": float(current['pwp'] or 0) if current else 0,
+                    "progress": calc_progress(current['pwp'] if current else 0, total_target['pwp'])
+                },
+                "clearance": {
+                    "target": total_target['clearance'],
+                    "current": float(current['clearance'] or 0) if current else 0,
+                    "progress": calc_progress(current['clearance'] if current else 0, total_target['clearance'])
+                },
+                "transactions": {
+                    "target": total_target['transactions'],
+                    "current": int(current['transactions'] or 0) if current else 0,
+                    "progress": calc_progress(current['transactions'] if current else 0, total_target['transactions'])
+                }
+            }
+
+            return {
+                "success": True,
+                "data": result,
+                "period": month or period.strftime("%Y-%m"),
+                "outlets_with_targets": len(targets)
+            }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching outlet targets: {str(e)}")
 
 
 if __name__ == "__main__":
