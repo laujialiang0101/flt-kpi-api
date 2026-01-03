@@ -91,6 +91,8 @@ class TargetUploadRow(BaseModel):
 
 ROLE_MAPPING = {
     'ADMINISTRATORS': 'admin',
+    'COO': 'admin',  # Chief Operating Officer - full admin access
+    'CMO': 'admin',  # Chief Marketing Officer - full admin access
     'SUPERVISOR': 'supervisor',
     'PIC OUTLET': 'pic',
     'PIC': 'pic',
