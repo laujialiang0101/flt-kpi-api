@@ -2,7 +2,8 @@
 import requests
 import os
 
-API_URL = "https://flt-kpi-api.onrender.com"
+# Use internal URL for Render-to-Render communication (faster, no egress)
+API_URL = os.getenv("API_URL", "http://flt-kpi-api:10000")
 API_KEY = os.getenv("PUSH_API_KEY", "flt-push-2024")
 
 response = requests.post(f"{API_URL}/api/v1/push/morning-briefing?api_key={API_KEY}")
