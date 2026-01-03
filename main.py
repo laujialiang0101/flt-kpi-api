@@ -1641,12 +1641,15 @@ async def get_outlet_performance(
     start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="End date YYYY-MM-DD")
 ):
-    """Get performance summary for each outlet.
+    """Get performance summary for each outlet - HYBRID: MV for history + real-time for today.
 
     Returns KPI metrics aggregated per outlet for comparison.
     """
     # Parse dates
     today = date.today()
+    today_start = datetime.combine(today, datetime.min.time())
+    today_end = datetime.combine(today + timedelta(days=1), datetime.min.time())
+
     if start_date:
         try:
             start = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -1667,10 +1670,10 @@ async def get_outlet_performance(
 
     try:
         async with pool.acquire() as conn:
-            # Use mv_outlet_daily_kpi (includes ALL sales) instead of mv_staff_daily_kpi (staff-attributed only)
-            # This ensures figures match Dynamod which includes all sales regardless of salesman assignment
+            # HYBRID APPROACH: MV for historical data (excluding today) + real-time for today
+            # Step 1: Get historical data from MV (excluding today)
             if outlet_list:
-                outlets = await conn.fetch("""
+                mv_outlets = await conn.fetch("""
                     SELECT
                         k.outlet_id,
                         l."AcLocationDesc" as outlet_name,
@@ -1691,12 +1694,12 @@ async def get_outlet_performance(
                     FROM analytics.mv_outlet_daily_kpi k
                     LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
                     WHERE k.sale_date BETWEEN $1 AND $2
+                      AND k.sale_date < $4
                       AND k.outlet_id = ANY($3)
                     GROUP BY k.outlet_id, l."AcLocationDesc"
-                    ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
-                """, start, end, outlet_list)
+                """, start, end, outlet_list, today)
             else:
-                outlets = await conn.fetch("""
+                mv_outlets = await conn.fetch("""
                     SELECT
                         k.outlet_id,
                         l."AcLocationDesc" as outlet_name,
@@ -1717,28 +1720,198 @@ async def get_outlet_performance(
                     FROM analytics.mv_outlet_daily_kpi k
                     LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
                     WHERE k.sale_date BETWEEN $1 AND $2
+                      AND k.sale_date < $3
                     GROUP BY k.outlet_id, l."AcLocationDesc"
-                    ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
-                """, start, end)
+                """, start, end, today)
+
+            # Convert to dict for easy merging
+            outlet_data = {}
+            for o in mv_outlets:
+                outlet_data[o['outlet_id']] = {
+                    'outlet_id': o['outlet_id'],
+                    'outlet_name': o['outlet_name'] or o['outlet_id'],
+                    'staff_count': int(o['staff_count'] or 0),
+                    'transactions': int(o['transactions'] or 0),
+                    'total_sales': float(o['total_sales'] or 0),
+                    'gross_profit': float(o['gross_profit'] or 0),
+                    'house_brand': float(o['house_brand'] or 0),
+                    'focused_1': float(o['focused_1'] or 0),
+                    'focused_2': float(o['focused_2'] or 0),
+                    'focused_3': float(o['focused_3'] or 0),
+                    'pwp': float(o['pwp'] or 0),
+                    'clearance': float(o['clearance'] or 0),
+                }
+
+            # Step 2: Get today's real-time data per outlet (if date range includes today)
+            if end >= today:
+                # Cash sales per outlet
+                if outlet_list:
+                    today_cash = await conn.fetch("""
+                        SELECT
+                            m."AcLocationID" as outlet_id,
+                            COUNT(DISTINCT m."DocumentNo") as transactions,
+                            COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
+                            COALESCE(SUM(d."ItemTotal" - COALESCE(d."ItemCost" * d."ItemQuantity", 0)), 0) as gross_profit,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance
+                        FROM "AcCSM" m
+                        INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
+                        LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                        WHERE m."DocumentDate" >= $1 AND m."DocumentDate" < $2
+                          AND m."AcLocationID" = ANY($3)
+                        GROUP BY m."AcLocationID"
+                    """, today_start, today_end, outlet_list)
+                else:
+                    today_cash = await conn.fetch("""
+                        SELECT
+                            m."AcLocationID" as outlet_id,
+                            COUNT(DISTINCT m."DocumentNo") as transactions,
+                            COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
+                            COALESCE(SUM(d."ItemTotal" - COALESCE(d."ItemCost" * d."ItemQuantity", 0)), 0) as gross_profit,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance
+                        FROM "AcCSM" m
+                        INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
+                        LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                        WHERE m."DocumentDate" >= $1 AND m."DocumentDate" < $2
+                        GROUP BY m."AcLocationID"
+                    """, today_start, today_end)
+
+                # Merge today's cash sales
+                for row in today_cash:
+                    oid = row['outlet_id']
+                    if oid not in outlet_data:
+                        # Get outlet name
+                        loc = await conn.fetchrow('SELECT "AcLocationDesc" FROM "AcLocation" WHERE "AcLocationID" = $1', oid)
+                        outlet_data[oid] = {
+                            'outlet_id': oid,
+                            'outlet_name': loc['AcLocationDesc'] if loc else oid,
+                            'staff_count': 0,
+                            'transactions': 0, 'total_sales': 0, 'gross_profit': 0,
+                            'house_brand': 0, 'focused_1': 0, 'focused_2': 0, 'focused_3': 0, 'pwp': 0, 'clearance': 0
+                        }
+                    outlet_data[oid]['transactions'] += int(row['transactions'] or 0)
+                    outlet_data[oid]['total_sales'] += float(row['total_sales'] or 0)
+                    outlet_data[oid]['gross_profit'] += float(row['gross_profit'] or 0)
+                    outlet_data[oid]['house_brand'] += float(row['house_brand'] or 0)
+                    outlet_data[oid]['focused_1'] += float(row['focused_1'] or 0)
+                    outlet_data[oid]['focused_2'] += float(row['focused_2'] or 0)
+                    outlet_data[oid]['focused_3'] += float(row['focused_3'] or 0)
+                    outlet_data[oid]['clearance'] += float(row['clearance'] or 0)
+
+                # Invoice sales per outlet
+                if outlet_list:
+                    today_inv = await conn.fetch("""
+                        SELECT
+                            m."AcLocationID" as outlet_id,
+                            COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
+                            COALESCE(SUM(d."ItemTotalPrice"), 0) as total_sales,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance
+                        FROM "AcCusInvoiceM" m
+                        INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
+                        LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                        WHERE m."DocumentDate" >= $1 AND m."DocumentDate" < $2
+                          AND m."AcLocationID" = ANY($3)
+                        GROUP BY m."AcLocationID"
+                    """, today_start, today_end, outlet_list)
+                else:
+                    today_inv = await conn.fetch("""
+                        SELECT
+                            m."AcLocationID" as outlet_id,
+                            COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
+                            COALESCE(SUM(d."ItemTotalPrice"), 0) as total_sales,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance
+                        FROM "AcCusInvoiceM" m
+                        INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
+                        LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
+                        WHERE m."DocumentDate" >= $1 AND m."DocumentDate" < $2
+                        GROUP BY m."AcLocationID"
+                    """, today_start, today_end)
+
+                # Merge today's invoice sales
+                for row in today_inv:
+                    oid = row['outlet_id']
+                    if oid not in outlet_data:
+                        loc = await conn.fetchrow('SELECT "AcLocationDesc" FROM "AcLocation" WHERE "AcLocationID" = $1', oid)
+                        outlet_data[oid] = {
+                            'outlet_id': oid,
+                            'outlet_name': loc['AcLocationDesc'] if loc else oid,
+                            'staff_count': 0,
+                            'transactions': 0, 'total_sales': 0, 'gross_profit': 0,
+                            'house_brand': 0, 'focused_1': 0, 'focused_2': 0, 'focused_3': 0, 'pwp': 0, 'clearance': 0
+                        }
+                    outlet_data[oid]['transactions'] += int(row['transactions'] or 0)
+                    outlet_data[oid]['total_sales'] += float(row['total_sales'] or 0)
+                    outlet_data[oid]['house_brand'] += float(row['house_brand'] or 0)
+                    outlet_data[oid]['focused_1'] += float(row['focused_1'] or 0)
+                    outlet_data[oid]['focused_2'] += float(row['focused_2'] or 0)
+                    outlet_data[oid]['focused_3'] += float(row['focused_3'] or 0)
+                    outlet_data[oid]['clearance'] += float(row['clearance'] or 0)
+
+                # PWP per outlet
+                if outlet_list:
+                    today_pwp = await conn.fetch("""
+                        SELECT m."AcLocationID" as outlet_id, COALESCE(SUM(d."ItemTotal"), 0) as pwp
+                        FROM "AcCSD" d
+                        INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                        INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
+                        WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
+                          AND m."DocumentDate" >= $1 AND m."DocumentDate" < $2
+                          AND m."AcLocationID" = ANY($3)
+                        GROUP BY m."AcLocationID"
+                    """, today_start, today_end, outlet_list)
+                else:
+                    today_pwp = await conn.fetch("""
+                        SELECT m."AcLocationID" as outlet_id, COALESCE(SUM(d."ItemTotal"), 0) as pwp
+                        FROM "AcCSD" d
+                        INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                        INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
+                        WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
+                          AND m."DocumentDate" >= $1 AND m."DocumentDate" < $2
+                        GROUP BY m."AcLocationID"
+                    """, today_start, today_end)
+
+                # Merge PWP
+                for row in today_pwp:
+                    oid = row['outlet_id']
+                    if oid in outlet_data:
+                        outlet_data[oid]['pwp'] += float(row['pwp'] or 0)
+
+            # Sort by total_sales descending
+            outlets_list = sorted(outlet_data.values(), key=lambda x: x['total_sales'], reverse=True)
 
             # Calculate totals
-            total_sales = sum(float(o['total_sales'] or 0) for o in outlets)
-            total_gp = sum(float(o['gross_profit'] or 0) for o in outlets)
-            total_hb = sum(float(o['house_brand'] or 0) for o in outlets)
-            total_f1 = sum(float(o['focused_1'] or 0) for o in outlets)
-            total_f2 = sum(float(o['focused_2'] or 0) for o in outlets)
-            total_f3 = sum(float(o['focused_3'] or 0) for o in outlets)
-            total_pwp = sum(float(o['pwp'] or 0) for o in outlets)
-            total_clearance = sum(float(o['clearance'] or 0) for o in outlets)
-            total_txn = sum(int(o['transactions'] or 0) for o in outlets)
-            total_staff = sum(int(o['staff_count'] or 0) for o in outlets)
+            total_sales = sum(o['total_sales'] for o in outlets_list)
+            total_gp = sum(o['gross_profit'] for o in outlets_list)
+            total_hb = sum(o['house_brand'] for o in outlets_list)
+            total_f1 = sum(o['focused_1'] for o in outlets_list)
+            total_f2 = sum(o['focused_2'] for o in outlets_list)
+            total_f3 = sum(o['focused_3'] for o in outlets_list)
+            total_pwp = sum(o['pwp'] for o in outlets_list)
+            total_clearance = sum(o['clearance'] for o in outlets_list)
+            total_txn = sum(o['transactions'] for o in outlets_list)
+            total_staff = sum(o['staff_count'] for o in outlets_list)
 
             return {
                 "success": True,
                 "data": {
                     "period": {"start": start.isoformat(), "end": end.isoformat()},
                     "summary": {
-                        "outlet_count": len(outlets),
+                        "outlet_count": len(outlets_list),
                         "staff_count": total_staff,
                         "total_sales": round(total_sales, 2),
                         "gross_profit": round(total_gp, 2),
@@ -1753,20 +1926,20 @@ async def get_outlet_performance(
                     "outlets": [
                         {
                             "outlet_id": o['outlet_id'],
-                            "outlet_name": o['outlet_name'] or o['outlet_id'],
-                            "staff_count": int(o['staff_count'] or 0),
-                            "total_sales": round(float(o['total_sales'] or 0), 2),
-                            "gross_profit": round(float(o['gross_profit'] or 0), 2),
-                            "house_brand": round(float(o['house_brand'] or 0), 2),
-                            "focused_1": round(float(o['focused_1'] or 0), 2),
-                            "focused_2": round(float(o['focused_2'] or 0), 2),
-                            "focused_3": round(float(o['focused_3'] or 0), 2),
-                            "pwp": round(float(o['pwp'] or 0), 2),
-                            "clearance": round(float(o['clearance'] or 0), 2),
-                            "transactions": int(o['transactions'] or 0),
+                            "outlet_name": o['outlet_name'],
+                            "staff_count": o['staff_count'],
+                            "total_sales": round(o['total_sales'], 2),
+                            "gross_profit": round(o['gross_profit'], 2),
+                            "house_brand": round(o['house_brand'], 2),
+                            "focused_1": round(o['focused_1'], 2),
+                            "focused_2": round(o['focused_2'], 2),
+                            "focused_3": round(o['focused_3'], 2),
+                            "pwp": round(o['pwp'], 2),
+                            "clearance": round(o['clearance'], 2),
+                            "transactions": o['transactions'],
                             "rank": idx + 1
                         }
-                        for idx, o in enumerate(outlets)
+                        for idx, o in enumerate(outlets_list)
                     ]
                 }
             }
