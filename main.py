@@ -274,6 +274,22 @@ async def lifespan(app: FastAPI):
             )
         """)
 
+        # Ensure OutletTargets has gross_profit_target column (migration for existing tables)
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_name = 'OutletTargets'
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'OutletTargets' AND column_name = 'gross_profit_target'
+                ) THEN
+                    ALTER TABLE "OutletTargets" ADD COLUMN gross_profit_target DECIMAL(15,2) DEFAULT 0;
+                END IF;
+            END $$;
+        """)
+
     yield
     await pool.close()
 
