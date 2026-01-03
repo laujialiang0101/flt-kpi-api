@@ -3614,7 +3614,7 @@ async def download_outlet_target_template():
         # Headers
         headers = [
             'outlet_id', 'outlet_name', 'year_month',
-            'total_sales', 'house_brand', 'focused_1', 'focused_2', 'focused_3',
+            'total_sales', 'gross_profit', 'house_brand', 'focused_1', 'focused_2', 'focused_3',
             'pwp', 'clearance', 'transactions'
         ]
         for col, header in enumerate(headers, 1):
@@ -3669,12 +3669,13 @@ async def upload_outlet_targets(
         errors = []
 
         async with pool.acquire() as conn:
-            # Ensure OutletTargets table exists
+            # Ensure OutletTargets table exists with gross_profit_target
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS "OutletTargets" (
                     outlet_id VARCHAR(20) NOT NULL,
                     year_month INT NOT NULL,
                     total_sales_target DECIMAL(15,2) DEFAULT 0,
+                    gross_profit_target DECIMAL(15,2) DEFAULT 0,
                     house_brand_target DECIMAL(15,2) DEFAULT 0,
                     focused_item_1_target DECIMAL(15,2) DEFAULT 0,
                     focused_item_2_target DECIMAL(15,2) DEFAULT 0,
@@ -3688,6 +3689,19 @@ async def upload_outlet_targets(
                 )
             """)
 
+            # Add gross_profit_target column if it doesn't exist (for existing tables)
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'OutletTargets' AND column_name = 'gross_profit_target'
+                    ) THEN
+                        ALTER TABLE "OutletTargets" ADD COLUMN gross_profit_target DECIMAL(15,2) DEFAULT 0;
+                    END IF;
+                END $$;
+            """)
+
             # Process rows (skip header)
             for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
                 if not row[0]:  # Skip empty rows
@@ -3698,13 +3712,14 @@ async def upload_outlet_targets(
                     # Skip outlet_name column (index 1)
                     year_month = int(row[2] or 0)
                     total_sales = float(row[3] or 0)
-                    house_brand = float(row[4] or 0)
-                    focused_1 = float(row[5] or 0)
-                    focused_2 = float(row[6] or 0)
-                    focused_3 = float(row[7] or 0)
-                    pwp = float(row[8] or 0)
-                    clearance = float(row[9] or 0)
-                    transactions = int(row[10] or 0)
+                    gross_profit = float(row[4] or 0)
+                    house_brand = float(row[5] or 0)
+                    focused_1 = float(row[6] or 0)
+                    focused_2 = float(row[7] or 0)
+                    focused_3 = float(row[8] or 0)
+                    pwp = float(row[9] or 0)
+                    clearance = float(row[10] or 0)
+                    transactions = int(row[11] or 0)
 
                     if year_month < 202401 or year_month > 203012:
                         errors.append(f"Row {row_num}: Invalid year_month {year_month}")
@@ -3713,14 +3728,15 @@ async def upload_outlet_targets(
                     # Upsert outlet target
                     await conn.execute("""
                         INSERT INTO "OutletTargets" (
-                            outlet_id, year_month, total_sales_target, house_brand_target,
-                            focused_item_1_target, focused_item_2_target, focused_item_3_target,
-                            pwp_target, stock_clearance_target, transaction_count_target,
-                            updated_at, updated_by
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11)
+                            outlet_id, year_month, total_sales_target, gross_profit_target,
+                            house_brand_target, focused_item_1_target, focused_item_2_target,
+                            focused_item_3_target, pwp_target, stock_clearance_target,
+                            transaction_count_target, updated_at, updated_by
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12)
                         ON CONFLICT (outlet_id, year_month)
                         DO UPDATE SET
                             total_sales_target = EXCLUDED.total_sales_target,
+                            gross_profit_target = EXCLUDED.gross_profit_target,
                             house_brand_target = EXCLUDED.house_brand_target,
                             focused_item_1_target = EXCLUDED.focused_item_1_target,
                             focused_item_2_target = EXCLUDED.focused_item_2_target,
@@ -3730,8 +3746,8 @@ async def upload_outlet_targets(
                             transaction_count_target = EXCLUDED.transaction_count_target,
                             updated_at = NOW(),
                             updated_by = EXCLUDED.updated_by
-                    """, outlet_id, year_month, total_sales, house_brand, focused_1,
-                        focused_2, focused_3, pwp, clearance, transactions, user['code'])
+                    """, outlet_id, year_month, total_sales, gross_profit, house_brand,
+                        focused_1, focused_2, focused_3, pwp, clearance, transactions, user['code'])
 
                     rows_processed += 1
 
@@ -3782,7 +3798,7 @@ async def get_outlet_targets(
             # Get targets
             if outlet_list:
                 targets = await conn.fetch("""
-                    SELECT outlet_id, total_sales_target, house_brand_target,
+                    SELECT outlet_id, total_sales_target, gross_profit_target, house_brand_target,
                            focused_item_1_target, focused_item_2_target, focused_item_3_target,
                            pwp_target, stock_clearance_target, transaction_count_target
                     FROM "OutletTargets"
@@ -3793,6 +3809,7 @@ async def get_outlet_targets(
                 current = await conn.fetchrow("""
                     SELECT
                         COALESCE(SUM(total_sales), 0) as total_sales,
+                        COALESCE(SUM(gross_profit), 0) as gross_profit,
                         COALESCE(SUM(house_brand_sales), 0) as house_brand,
                         COALESCE(SUM(focused_1_sales), 0) as focused_1,
                         COALESCE(SUM(focused_2_sales), 0) as focused_2,
@@ -3807,7 +3824,7 @@ async def get_outlet_targets(
             else:
                 # All outlets
                 targets = await conn.fetch("""
-                    SELECT outlet_id, total_sales_target, house_brand_target,
+                    SELECT outlet_id, total_sales_target, gross_profit_target, house_brand_target,
                            focused_item_1_target, focused_item_2_target, focused_item_3_target,
                            pwp_target, stock_clearance_target, transaction_count_target
                     FROM "OutletTargets"
@@ -3817,6 +3834,7 @@ async def get_outlet_targets(
                 current = await conn.fetchrow("""
                     SELECT
                         COALESCE(SUM(total_sales), 0) as total_sales,
+                        COALESCE(SUM(gross_profit), 0) as gross_profit,
                         COALESCE(SUM(house_brand_sales), 0) as house_brand,
                         COALESCE(SUM(focused_1_sales), 0) as focused_1,
                         COALESCE(SUM(focused_2_sales), 0) as focused_2,
@@ -3831,6 +3849,7 @@ async def get_outlet_targets(
             # Sum up all targets
             total_target = {
                 'total_sales': sum(float(t['total_sales_target'] or 0) for t in targets),
+                'gross_profit': sum(float(t['gross_profit_target'] or 0) for t in targets),
                 'house_brand': sum(float(t['house_brand_target'] or 0) for t in targets),
                 'focused_1': sum(float(t['focused_item_1_target'] or 0) for t in targets),
                 'focused_2': sum(float(t['focused_item_2_target'] or 0) for t in targets),
@@ -3850,6 +3869,11 @@ async def get_outlet_targets(
                     "target": total_target['total_sales'],
                     "current": float(current['total_sales'] or 0) if current else 0,
                     "progress": calc_progress(current['total_sales'] if current else 0, total_target['total_sales'])
+                },
+                "gross_profit": {
+                    "target": total_target['gross_profit'],
+                    "current": float(current['gross_profit'] or 0) if current else 0,
+                    "progress": calc_progress(current['gross_profit'] if current else 0, total_target['gross_profit'])
                 },
                 "house_brand": {
                     "target": total_target['house_brand'],
