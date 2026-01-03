@@ -1,8 +1,9 @@
 services:
+  # Main API Service
   - type: web
     name: flt-kpi-api
     runtime: python
-    plan: free
+    plan: pro  # Updated to Pro plan
     region: singapore
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
@@ -16,3 +17,34 @@ services:
         value: flt_sales_commission_db_user
       - key: DB_PASSWORD
         sync: false  # Set manually in Render dashboard
+      - key: REFRESH_API_KEY
+        sync: false  # Set manually: flt-refresh-2024
+      - key: PUSH_API_KEY
+        sync: false  # Set manually for push notifications
+
+  # Cron Job: MV Refresh every 30 min during business hours (8am-11pm MYT)
+  - type: cron
+    name: flt-mv-refresh
+    runtime: python
+    region: singapore
+    schedule: "*/30 0-15 * * *"  # Every 30 min, 0:00-15:59 UTC = 8am-11:59pm MYT
+    buildCommand: pip install requests
+    startCommand: python -c "import requests; r=requests.post('https://flt-kpi-api.onrender.com/api/v1/admin/refresh-views?api_key=flt-refresh-2024'); print(f'Status: {r.status_code}, Response: {r.text[:200]}')"
+
+  # Cron Job: Morning Briefing at 8am MYT (0:00 UTC)
+  - type: cron
+    name: flt-morning-briefing
+    runtime: python
+    region: singapore
+    schedule: "0 0 * * *"  # 0:00 UTC = 8:00 AM MYT
+    buildCommand: pip install requests
+    startCommand: python -c "import requests; r=requests.post('https://flt-kpi-api.onrender.com/api/v1/push/morning-briefing?api_key=flt-push-2024'); print(f'Status: {r.status_code}')"
+
+  # Cron Job: Evening Recap at 10:30pm MYT (14:30 UTC)
+  - type: cron
+    name: flt-evening-recap
+    runtime: python
+    region: singapore
+    schedule: "30 14 * * *"  # 14:30 UTC = 10:30 PM MYT
+    buildCommand: pip install requests
+    startCommand: python -c "import requests; r=requests.post('https://flt-kpi-api.onrender.com/api/v1/push/evening-recap?api_key=flt-push-2024'); print(f'Status: {r.status_code}')"

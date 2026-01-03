@@ -2933,60 +2933,108 @@ async def send_evening_recap(
 # Scheduled Refresh Endpoint (for cron jobs)
 # ============================================================================
 
-@app.post("/api/v1/admin/refresh-views")
-async def refresh_materialized_views(
-    api_key: str = Query(..., description="API key for authentication")
-):
-    """Refresh all materialized views. Call this via cron job every 30 minutes during business hours.
+# Background refresh state
+_refresh_in_progress = False
+_last_refresh_result = None
 
-    Recommended schedule (using external cron service like cron-job.org):
-    - Every 30 min during 8am-10pm: */30 8-22 * * *
-    - Final refresh at 11pm: 0 23 * * *
-    """
-    # Simple API key auth for cron jobs
-    expected_key = os.getenv('REFRESH_API_KEY', 'flt-refresh-2024')
-    if api_key != expected_key:
-        raise HTTPException(status_code=401, detail="Invalid API key")
 
+async def _do_background_refresh():
+    """Background task to refresh all materialized views."""
+    global _refresh_in_progress, _last_refresh_result
     import time
     start_time = time.time()
     results = {}
 
     try:
         async with pool.acquire() as conn:
-            # Refresh each view and track timing
+            # Set longer timeout for MV refresh (15 min)
+            await conn.execute("SET statement_timeout = '900000'")
+
             views = [
                 'analytics.mv_staff_daily_kpi',
                 'analytics.mv_outlet_daily_kpi',
-                'analytics.mv_staff_rankings',
-                'analytics.mv_staff_daily_commission'
+                'analytics.mv_staff_rankings'
             ]
 
             for view in views:
                 view_start = time.time()
                 try:
-                    # Use CONCURRENTLY to avoid blocking reads (requires unique index)
                     await conn.execute(f'REFRESH MATERIALIZED VIEW CONCURRENTLY {view}')
                 except Exception as e:
-                    # Fall back to regular refresh if CONCURRENTLY fails (no unique index)
-                    if 'unique index' in str(e).lower():
-                        await conn.execute(f'REFRESH MATERIALIZED VIEW {view}')
+                    if 'unique index' in str(e).lower() or 'does not exist' in str(e).lower():
+                        try:
+                            await conn.execute(f'REFRESH MATERIALIZED VIEW {view}')
+                        except:
+                            results[view] = f"skipped: {str(e)[:50]}"
+                            continue
                     else:
-                        raise e
+                        results[view] = f"error: {str(e)[:50]}"
+                        continue
                 results[view] = round(time.time() - view_start, 1)
 
-        total_time = round(time.time() - start_time, 1)
+        _last_refresh_result = {
+            "success": True,
+            "timing": results,
+            "total_seconds": round(time.time() - start_time, 1),
+            "completed_at": datetime.now().isoformat()
+        }
+    except Exception as e:
+        _last_refresh_result = {
+            "success": False,
+            "error": str(e),
+            "completed_at": datetime.now().isoformat()
+        }
+    finally:
+        _refresh_in_progress = False
 
+
+@app.post("/api/v1/admin/refresh-views")
+async def refresh_materialized_views(
+    api_key: str = Query(..., description="API key for authentication"),
+    wait: bool = Query(False, description="Wait for completion (default: fire-and-forget)")
+):
+    """Refresh all materialized views. Returns immediately by default (fire-and-forget).
+
+    Use wait=true to wait for completion (may timeout for external calls).
+    Check /api/v1/admin/refresh-status for background refresh status.
+    """
+    global _refresh_in_progress
+
+    expected_key = os.getenv('REFRESH_API_KEY', 'flt-refresh-2024')
+    if api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    if _refresh_in_progress:
         return {
             "success": True,
-            "message": "All materialized views refreshed",
-            "timing": results,
-            "total_seconds": total_time,
-            "refreshed_at": datetime.now().isoformat()
+            "message": "Refresh already in progress",
+            "status": "running"
         }
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Refresh failed: {str(e)}")
+    _refresh_in_progress = True
+
+    if wait:
+        # Wait for completion (original behavior)
+        await _do_background_refresh()
+        return _last_refresh_result
+    else:
+        # Fire-and-forget: start background task and return immediately
+        asyncio.create_task(_do_background_refresh())
+        return {
+            "success": True,
+            "message": "Refresh started in background",
+            "status": "started",
+            "check_status_at": "/api/v1/admin/refresh-status"
+        }
+
+
+@app.get("/api/v1/admin/refresh-status")
+async def get_refresh_status():
+    """Check the status of background MV refresh."""
+    return {
+        "in_progress": _refresh_in_progress,
+        "last_result": _last_refresh_result
+    }
 
 
 @app.get("/api/v1/admin/view-status")
@@ -3382,7 +3430,7 @@ async def download_outlet_target_template():
             outlets = await conn.fetch("""
                 SELECT "AcLocationID" as id, "AcLocationDesc" as name
                 FROM "AcLocation"
-                WHERE "Active" = 'Y'
+                WHERE "IsActive" = 'Y'
                 ORDER BY "AcLocationID"
             """)
 
