@@ -3163,14 +3163,16 @@ async def _do_background_refresh():
                 try:
                     await conn.execute(f'REFRESH MATERIALIZED VIEW CONCURRENTLY {view}')
                 except Exception as e:
-                    if 'unique index' in str(e).lower() or 'does not exist' in str(e).lower():
+                    error_type = type(e).__name__
+                    error_msg = str(e) or repr(e)
+                    if 'unique index' in error_msg.lower() or 'does not exist' in error_msg.lower():
                         try:
                             await conn.execute(f'REFRESH MATERIALIZED VIEW {view}')
-                        except:
-                            results[view] = f"skipped: {str(e)[:50]}"
+                        except Exception as e2:
+                            results[view] = f"skipped: {type(e2).__name__}: {str(e2)[:40]}"
                             continue
                     else:
-                        results[view] = f"error: {str(e)[:50]}"
+                        results[view] = f"error: {error_type}: {error_msg[:40]}"
                         continue
                 results[view] = round(time.time() - view_start, 1)
 
