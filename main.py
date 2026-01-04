@@ -49,6 +49,17 @@ VAPID_PRIVATE_KEY = os.getenv('VAPID_PRIVATE_KEY', 'Yt3wLOw0I2VT0pr-7abhp9MqklTv
 VAPID_PUBLIC_KEY = os.getenv('VAPID_PUBLIC_KEY', 'BNEaN-5grwfKBkK2JPQCCFnLIgW8CSUs0LU2dI5rGlJGzauTBinEfYnf0wOLKTmIqgBnfN1N9W7F1dq_7K-5hHc')
 VAPID_CLAIMS = {"sub": "mailto:admin@farmasilautan.com"}
 
+# KPI Category Mapping - AcStockUDGroup1ID values in database
+# Maps display names to actual database values
+KPI_CATEGORIES = {
+    'HOUSE_BRAND': 'FLTHB',
+    'FOCUSED_1': 'FLTF1',
+    'FOCUSED_2': 'FLTF2',
+    'FOCUSED_3': 'FLTF3',
+    'STOCK_CLEARANCE': 'STOCK CLEARANCE',
+    'PWP': 'PWP',  # PWP uses promotion system, not UD1
+}
+
 
 # ============================================================================
 # Pydantic Models
@@ -799,10 +810,10 @@ async def get_my_dashboard(
                         COUNT(DISTINCT doc_no) AS transactions,
                         SUM(amount) AS total_sales,
                         SUM(amount - cost) AS gross_profit,
-                        SUM(CASE WHEN stock_group = 'HOUSE BRAND' THEN amount ELSE 0 END) AS house_brand_sales,
-                        SUM(CASE WHEN stock_group = 'FOCUSED ITEM 1' THEN amount ELSE 0 END) AS focused_1_sales,
-                        SUM(CASE WHEN stock_group = 'FOCUSED ITEM 2' THEN amount ELSE 0 END) AS focused_2_sales,
-                        SUM(CASE WHEN stock_group = 'FOCUSED ITEM 3' THEN amount ELSE 0 END) AS focused_3_sales,
+                        SUM(CASE WHEN stock_group = 'FLTHB' THEN amount ELSE 0 END) AS house_brand_sales,
+                        SUM(CASE WHEN stock_group = 'FLTF1' THEN amount ELSE 0 END) AS focused_1_sales,
+                        SUM(CASE WHEN stock_group = 'FLTF2' THEN amount ELSE 0 END) AS focused_2_sales,
+                        SUM(CASE WHEN stock_group = 'FLTF3' THEN amount ELSE 0 END) AS focused_3_sales,
                         SUM(CASE WHEN stock_group = 'STOCK CLEARANCE' THEN amount ELSE 0 END) AS clearance_sales,
                         (SELECT COALESCE(pwp_sales, 0) FROM pwp) AS pwp_sales
                     FROM combined_sales
@@ -1146,10 +1157,10 @@ async def get_team_overview(
                         COUNT(DISTINCT m."DocumentNo") as transactions,
                         COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
                         COALESCE(SUM(d."ItemTotal" - COALESCE(d."ItemCost" * d."ItemQuantity", 0)), 0) as gross_profit,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
                     FROM "AcCSM" m
                     INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
@@ -1163,10 +1174,10 @@ async def get_team_overview(
                     SELECT
                         COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
                         COALESCE(SUM(d."ItemTotalPrice"), 0) as total_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales
                     FROM "AcCusInvoiceM" m
                     INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
@@ -1193,10 +1204,10 @@ async def get_team_overview(
                         COUNT(DISTINCT m."DocumentNo") as transactions,
                         COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
                         COALESCE(SUM(d."ItemTotal" - COALESCE(d."ItemCost" * d."ItemQuantity", 0)), 0) as gross_profit,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
                     FROM "AcCSM" m
                     INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
@@ -1209,10 +1220,10 @@ async def get_team_overview(
                     SELECT
                         COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
                         COALESCE(SUM(d."ItemTotalPrice"), 0) as total_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales
                     FROM "AcCusInvoiceM" m
                     INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
@@ -1237,10 +1248,10 @@ async def get_team_overview(
                         COUNT(DISTINCT m."DocumentNo") as transactions,
                         COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
                         COALESCE(SUM(d."ItemTotal" - COALESCE(d."ItemCost" * d."ItemQuantity", 0)), 0) as gross_profit,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
                     FROM "AcCSM" m
                     INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
@@ -1254,10 +1265,10 @@ async def get_team_overview(
                     SELECT
                         COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
                         COALESCE(SUM(d."ItemTotalPrice"), 0) as total_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales
                     FROM "AcCusInvoiceM" m
                     INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
@@ -1770,10 +1781,10 @@ async def get_outlet_performance(
                             COUNT(DISTINCT m."DocumentNo") as transactions,
                             COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
                             COALESCE(SUM(d."ItemTotal" - COALESCE(d."ItemCost" * d."ItemQuantity", 0)), 0) as gross_profit,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance
                         FROM "AcCSM" m
                         INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
@@ -1789,10 +1800,10 @@ async def get_outlet_performance(
                             COUNT(DISTINCT m."DocumentNo") as transactions,
                             COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
                             COALESCE(SUM(d."ItemTotal" - COALESCE(d."ItemCost" * d."ItemQuantity", 0)), 0) as gross_profit,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance
                         FROM "AcCSM" m
                         INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
@@ -1830,10 +1841,10 @@ async def get_outlet_performance(
                             m."AcLocationID" as outlet_id,
                             COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
                             COALESCE(SUM(d."ItemTotalPrice"), 0) as total_sales,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance
                         FROM "AcCusInvoiceM" m
                         INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
@@ -1848,10 +1859,10 @@ async def get_outlet_performance(
                             m."AcLocationID" as outlet_id,
                             COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
                             COALESCE(SUM(d."ItemTotalPrice"), 0) as total_sales,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'HOUSE BRAND' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FOCUSED ITEM 3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance
                         FROM "AcCusInvoiceM" m
                         INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
