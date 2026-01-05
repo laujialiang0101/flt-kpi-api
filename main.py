@@ -1421,92 +1421,293 @@ async def get_team_overview(
             """, outlet_id)
             outlet_name = outlet_info['outlet_name'] if outlet_info else outlet_id
 
-        # Staff performance
+        # Staff performance - HYBRID: MV for history + real-time for today
         staff = []
+        staff_data = {}  # staff_id -> aggregated data
+
+        # Helper to safely get historical date range (excluding today)
+        hist_end = min(end_date, today - timedelta(days=1)) if end_date >= today else end_date
+        has_historical = start_date <= hist_end
+        has_today = end_date >= today
+
         if view_all:
-            # All outlets - show top performers across all allowed outlets (or all if no filter)
-            if outlet_list:
-                # Filter by allowed outlets
-                staff = await conn.fetch("""
-                    SELECT
-                        k.staff_id,
-                        s."AcSalesmanName" as staff_name,
-                        s."AcSalesmanGroupID" as outlet_id,
-                        COALESCE(SUM(k.transactions), 0) as transactions,
-                        COALESCE(SUM(k.total_sales), 0) as total_sales,
-                        COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
-                        COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
-                        COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
-                        COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
-                        COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
-                        COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
-                        r.company_rank_sales as rank
-                    FROM analytics.mv_staff_daily_kpi k
-                    LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
-                    LEFT JOIN analytics.mv_staff_rankings r
-                        ON k.staff_id = r.staff_id
-                        AND r.month = DATE_TRUNC('month', $1::date)
-                        AND r.outlet_id = k.outlet_id
-                    WHERE k.sale_date BETWEEN $1 AND $2
-                      AND k.outlet_id = ANY($3)
-                    GROUP BY k.staff_id, s."AcSalesmanName", s."AcSalesmanGroupID", r.company_rank_sales
-                    ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
-                """, start_date, end_date, outlet_list)
-            else:
-                # No filter - show all staff
-                staff = await conn.fetch("""
-                    SELECT
-                        k.staff_id,
-                        s."AcSalesmanName" as staff_name,
-                        s."AcSalesmanGroupID" as outlet_id,
-                        COALESCE(SUM(k.transactions), 0) as transactions,
-                        COALESCE(SUM(k.total_sales), 0) as total_sales,
-                        COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
-                        COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
-                        COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
-                        COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
-                        COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
-                        COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
-                        r.company_rank_sales as rank
-                    FROM analytics.mv_staff_daily_kpi k
-                    LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
-                    LEFT JOIN analytics.mv_staff_rankings r
-                        ON k.staff_id = r.staff_id
-                        AND r.month = DATE_TRUNC('month', $1::date)
-                        AND r.outlet_id = k.outlet_id
-                    WHERE k.sale_date BETWEEN $1 AND $2
-                    GROUP BY k.staff_id, s."AcSalesmanName", s."AcSalesmanGroupID", r.company_rank_sales
-                    ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
-                """, start_date, end_date)
+            # All outlets - show top performers across all allowed outlets
+            # Step 1: Get historical data from MV (excluding today)
+            if has_historical:
+                if outlet_list:
+                    mv_staff = await conn.fetch("""
+                        SELECT
+                            k.staff_id,
+                            s."AcSalesmanName" as staff_name,
+                            s."AcSalesmanGroupID" as outlet_id,
+                            COALESCE(SUM(k.transactions), 0) as transactions,
+                            COALESCE(SUM(k.total_sales), 0) as total_sales,
+                            COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
+                            COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
+                            COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
+                            COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
+                            COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
+                            COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
+                            r.company_rank_sales as rank
+                        FROM analytics.mv_staff_daily_kpi k
+                        LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
+                        LEFT JOIN analytics.mv_staff_rankings r
+                            ON k.staff_id = r.staff_id
+                            AND r.month = DATE_TRUNC('month', $1::date)
+                            AND r.outlet_id = k.outlet_id
+                        WHERE k.sale_date BETWEEN $1 AND $2
+                          AND k.outlet_id = ANY($3)
+                        GROUP BY k.staff_id, s."AcSalesmanName", s."AcSalesmanGroupID", r.company_rank_sales
+                    """, start_date, hist_end, outlet_list)
+                else:
+                    mv_staff = await conn.fetch("""
+                        SELECT
+                            k.staff_id,
+                            s."AcSalesmanName" as staff_name,
+                            s."AcSalesmanGroupID" as outlet_id,
+                            COALESCE(SUM(k.transactions), 0) as transactions,
+                            COALESCE(SUM(k.total_sales), 0) as total_sales,
+                            COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
+                            COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
+                            COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
+                            COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
+                            COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
+                            COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
+                            r.company_rank_sales as rank
+                        FROM analytics.mv_staff_daily_kpi k
+                        LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
+                        LEFT JOIN analytics.mv_staff_rankings r
+                            ON k.staff_id = r.staff_id
+                            AND r.month = DATE_TRUNC('month', $1::date)
+                            AND r.outlet_id = k.outlet_id
+                        WHERE k.sale_date BETWEEN $1 AND $2
+                        GROUP BY k.staff_id, s."AcSalesmanName", s."AcSalesmanGroupID", r.company_rank_sales
+                    """, start_date, hist_end)
+
+                for row in mv_staff:
+                    sid = row['staff_id']
+                    staff_data[sid] = {
+                        'staff_id': sid,
+                        'staff_name': row['staff_name'],
+                        'outlet_id': row['outlet_id'],
+                        'transactions': int(row['transactions'] or 0),
+                        'total_sales': float(row['total_sales'] or 0),
+                        'house_brand_sales': float(row['house_brand_sales'] or 0),
+                        'focused_1_sales': float(row['focused_1_sales'] or 0),
+                        'focused_2_sales': float(row['focused_2_sales'] or 0),
+                        'focused_3_sales': float(row['focused_3_sales'] or 0),
+                        'pwp_sales': float(row['pwp_sales'] or 0),
+                        'clearance_sales': float(row['clearance_sales'] or 0),
+                        'rank': row['rank']
+                    }
+
+            # Step 2: Get today's data from base tables (real-time)
+            if has_today:
+                if outlet_list:
+                    today_staff = await conn.fetch("""
+                        SELECT
+                            d."AcSalesmanID" as staff_id,
+                            s."AcSalesmanName" as staff_name,
+                            s."AcSalesmanGroupID" as outlet_id,
+                            COUNT(DISTINCT d."DocumentNo") as transactions,
+                            COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
+                            COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
+                            COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
+                            COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
+                            COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
+                            COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTSC' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                        FROM "AcCSD" d
+                        INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                        LEFT JOIN "AcSalesman" s ON d."AcSalesmanID" = s."AcSalesmanID"
+                        LEFT JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID" AND d."AcStockUOMID" = sc."AcStockUOMID"
+                        WHERE m."DocumentDate" >= $1 AND m."DocumentDate" < $2
+                          AND m."AcLocationID" = ANY($3)
+                        GROUP BY d."AcSalesmanID", s."AcSalesmanName", s."AcSalesmanGroupID"
+                    """, today_start, today_end, outlet_list)
+                else:
+                    today_staff = await conn.fetch("""
+                        SELECT
+                            d."AcSalesmanID" as staff_id,
+                            s."AcSalesmanName" as staff_name,
+                            s."AcSalesmanGroupID" as outlet_id,
+                            COUNT(DISTINCT d."DocumentNo") as transactions,
+                            COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
+                            COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
+                            COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
+                            COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
+                            COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
+                            COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTSC' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                        FROM "AcCSD" d
+                        INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                        LEFT JOIN "AcSalesman" s ON d."AcSalesmanID" = s."AcSalesmanID"
+                        LEFT JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID" AND d."AcStockUOMID" = sc."AcStockUOMID"
+                        WHERE m."DocumentDate" >= $1 AND m."DocumentDate" < $2
+                        GROUP BY d."AcSalesmanID", s."AcSalesmanName", s."AcSalesmanGroupID"
+                    """, today_start, today_end)
+
+                # Get today's PWP data separately
+                if outlet_list:
+                    today_pwp = await conn.fetch("""
+                        SELECT d."AcSalesmanID" as staff_id, COALESCE(SUM(d."ItemTotal"), 0) as pwp_sales
+                        FROM "AcCSD" d
+                        INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                        INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
+                        WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
+                          AND m."DocumentDate" >= $1 AND m."DocumentDate" < $2
+                          AND m."AcLocationID" = ANY($3)
+                        GROUP BY d."AcSalesmanID"
+                    """, today_start, today_end, outlet_list)
+                else:
+                    today_pwp = await conn.fetch("""
+                        SELECT d."AcSalesmanID" as staff_id, COALESCE(SUM(d."ItemTotal"), 0) as pwp_sales
+                        FROM "AcCSD" d
+                        INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                        INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
+                        WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
+                          AND m."DocumentDate" >= $1 AND m."DocumentDate" < $2
+                        GROUP BY d."AcSalesmanID"
+                    """, today_start, today_end)
+
+                pwp_map = {row['staff_id']: float(row['pwp_sales'] or 0) for row in today_pwp}
+
+                # Merge today's data
+                for row in today_staff:
+                    sid = row['staff_id']
+                    if sid in staff_data:
+                        staff_data[sid]['transactions'] += int(row['transactions'] or 0)
+                        staff_data[sid]['total_sales'] += float(row['total_sales'] or 0)
+                        staff_data[sid]['house_brand_sales'] += float(row['house_brand_sales'] or 0)
+                        staff_data[sid]['focused_1_sales'] += float(row['focused_1_sales'] or 0)
+                        staff_data[sid]['focused_2_sales'] += float(row['focused_2_sales'] or 0)
+                        staff_data[sid]['focused_3_sales'] += float(row['focused_3_sales'] or 0)
+                        staff_data[sid]['clearance_sales'] += float(row['clearance_sales'] or 0)
+                        staff_data[sid]['pwp_sales'] += pwp_map.get(sid, 0)
+                    else:
+                        staff_data[sid] = {
+                            'staff_id': sid,
+                            'staff_name': row['staff_name'],
+                            'outlet_id': row['outlet_id'],
+                            'transactions': int(row['transactions'] or 0),
+                            'total_sales': float(row['total_sales'] or 0),
+                            'house_brand_sales': float(row['house_brand_sales'] or 0),
+                            'focused_1_sales': float(row['focused_1_sales'] or 0),
+                            'focused_2_sales': float(row['focused_2_sales'] or 0),
+                            'focused_3_sales': float(row['focused_3_sales'] or 0),
+                            'pwp_sales': pwp_map.get(sid, 0),
+                            'clearance_sales': float(row['clearance_sales'] or 0),
+                            'rank': None
+                        }
+
+            # Convert to list and sort
+            staff = sorted(staff_data.values(), key=lambda x: x['total_sales'], reverse=True)
+
         elif staff_group:
-            # Single outlet with staff group
-            staff = await conn.fetch("""
-                SELECT
-                    s."AcSalesmanID" as staff_id,
-                    s."AcSalesmanName" as staff_name,
-                    COALESCE(SUM(k.transactions), 0) as transactions,
-                    COALESCE(SUM(k.total_sales), 0) as total_sales,
-                    COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
-                    COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
-                    COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
-                    COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
-                    COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
-                    COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
-                    r.outlet_rank_sales as rank
+            # Single outlet with staff group - HYBRID approach
+            # Step 1: Get all active staff in this group
+            all_staff = await conn.fetch("""
+                SELECT s."AcSalesmanID" as staff_id, s."AcSalesmanName" as staff_name,
+                       r.outlet_rank_sales as rank
                 FROM "AcSalesman" s
-                LEFT JOIN analytics.mv_staff_daily_kpi k
-                    ON s."AcSalesmanID" = k.staff_id
-                    AND k.outlet_id = $1
-                    AND k.sale_date BETWEEN $2 AND $3
                 LEFT JOIN analytics.mv_staff_rankings r
                     ON s."AcSalesmanID" = r.staff_id
                     AND r.outlet_id = $1
                     AND r.month = DATE_TRUNC('month', $2::date)
-                WHERE s."AcSalesmanGroupID" = $4
-                  AND s."Active" = 'Y'
-                GROUP BY s."AcSalesmanID", s."AcSalesmanName", r.outlet_rank_sales
-                ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
-            """, outlet_id, start_date, end_date, staff_group)
+                WHERE s."AcSalesmanGroupID" = $3 AND s."Active" = 'Y'
+            """, outlet_id, start_date, staff_group)
+
+            for row in all_staff:
+                staff_data[row['staff_id']] = {
+                    'staff_id': row['staff_id'],
+                    'staff_name': row['staff_name'],
+                    'transactions': 0,
+                    'total_sales': 0,
+                    'house_brand_sales': 0,
+                    'focused_1_sales': 0,
+                    'focused_2_sales': 0,
+                    'focused_3_sales': 0,
+                    'pwp_sales': 0,
+                    'clearance_sales': 0,
+                    'rank': row['rank']
+                }
+
+            # Step 2: Get historical data from MV (excluding today)
+            if has_historical:
+                mv_staff = await conn.fetch("""
+                    SELECT
+                        k.staff_id,
+                        COALESCE(SUM(k.transactions), 0) as transactions,
+                        COALESCE(SUM(k.total_sales), 0) as total_sales,
+                        COALESCE(SUM(k.house_brand_sales), 0) as house_brand_sales,
+                        COALESCE(SUM(k.focused_1_sales), 0) as focused_1_sales,
+                        COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
+                        COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
+                        COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
+                        COALESCE(SUM(k.clearance_sales), 0) as clearance_sales
+                    FROM analytics.mv_staff_daily_kpi k
+                    WHERE k.outlet_id = $1 AND k.sale_date BETWEEN $2 AND $3
+                    GROUP BY k.staff_id
+                """, outlet_id, start_date, hist_end)
+
+                for row in mv_staff:
+                    sid = row['staff_id']
+                    if sid in staff_data:
+                        staff_data[sid]['transactions'] += int(row['transactions'] or 0)
+                        staff_data[sid]['total_sales'] += float(row['total_sales'] or 0)
+                        staff_data[sid]['house_brand_sales'] += float(row['house_brand_sales'] or 0)
+                        staff_data[sid]['focused_1_sales'] += float(row['focused_1_sales'] or 0)
+                        staff_data[sid]['focused_2_sales'] += float(row['focused_2_sales'] or 0)
+                        staff_data[sid]['focused_3_sales'] += float(row['focused_3_sales'] or 0)
+                        staff_data[sid]['pwp_sales'] += float(row['pwp_sales'] or 0)
+                        staff_data[sid]['clearance_sales'] += float(row['clearance_sales'] or 0)
+
+            # Step 3: Get today's data from base tables (real-time)
+            if has_today:
+                today_staff = await conn.fetch("""
+                    SELECT
+                        d."AcSalesmanID" as staff_id,
+                        COUNT(DISTINCT d."DocumentNo") as transactions,
+                        COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
+                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
+                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
+                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
+                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
+                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTSC' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                    FROM "AcCSD" d
+                    INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                    LEFT JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID" AND d."AcStockUOMID" = sc."AcStockUOMID"
+                    WHERE m."AcLocationID" = $1
+                      AND m."DocumentDate" >= $2 AND m."DocumentDate" < $3
+                    GROUP BY d."AcSalesmanID"
+                """, outlet_id, today_start, today_end)
+
+                # Get today's PWP
+                today_pwp = await conn.fetch("""
+                    SELECT d."AcSalesmanID" as staff_id, COALESCE(SUM(d."ItemTotal"), 0) as pwp_sales
+                    FROM "AcCSD" d
+                    INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                    INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
+                    WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
+                      AND m."AcLocationID" = $1
+                      AND m."DocumentDate" >= $2 AND m."DocumentDate" < $3
+                    GROUP BY d."AcSalesmanID"
+                """, outlet_id, today_start, today_end)
+
+                pwp_map = {row['staff_id']: float(row['pwp_sales'] or 0) for row in today_pwp}
+
+                for row in today_staff:
+                    sid = row['staff_id']
+                    if sid in staff_data:
+                        staff_data[sid]['transactions'] += int(row['transactions'] or 0)
+                        staff_data[sid]['total_sales'] += float(row['total_sales'] or 0)
+                        staff_data[sid]['house_brand_sales'] += float(row['house_brand_sales'] or 0)
+                        staff_data[sid]['focused_1_sales'] += float(row['focused_1_sales'] or 0)
+                        staff_data[sid]['focused_2_sales'] += float(row['focused_2_sales'] or 0)
+                        staff_data[sid]['focused_3_sales'] += float(row['focused_3_sales'] or 0)
+                        staff_data[sid]['clearance_sales'] += float(row['clearance_sales'] or 0)
+                        staff_data[sid]['pwp_sales'] += pwp_map.get(sid, 0)
+
+            # Convert to list and sort
+            staff = sorted(staff_data.values(), key=lambda x: x['total_sales'], reverse=True)
 
         return {
             "success": True,
