@@ -3586,7 +3586,8 @@ async def _do_background_refresh():
             views = [
                 'analytics.mv_staff_daily_kpi',
                 'analytics.mv_outlet_daily_kpi',
-                'analytics.mv_staff_rankings'
+                'analytics.mv_staff_rankings',
+                'analytics.mv_staff_daily_commission'  # Commission MV added
             ]
 
             for view in views:
