@@ -1,0 +1,66 @@
+name: Commission Notifications
+
+on:
+  schedule:
+    # Every 10 minutes during business hours (9am-10pm Malaysia = 1:00-14:00 UTC)
+    # GitHub Actions cron is in UTC
+    - cron: '*/10 1-14 * * *'
+  # Allow manual trigger for testing
+  workflow_dispatch:
+
+jobs:
+  check-commissions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Commission Changes
+        run: |
+          echo "Checking commission changes at $(date)"
+          response=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://flt-kpi-api.onrender.com/api/v1/push/commission-check?api_key=${{ secrets.PUSH_API_KEY }}")
+
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+
+          echo "Response: $body"
+          echo "HTTP Status: $http_code"
+
+          if [ "$http_code" = "200" ]; then
+            echo "Commission check completed successfully!"
+            # Parse and display results
+            notified=$(echo "$body" | grep -o '"notified":[0-9]*' | cut -d: -f2)
+            if [ ! -z "$notified" ] && [ "$notified" != "0" ]; then
+              echo "Sent $notified commission notifications!"
+            fi
+          else
+            echo "Commission check failed with status $http_code"
+            # Don't fail the job - commission check is non-critical
+          fi
+
+  # Also check for rank changes hourly
+  check-ranks:
+    runs-on: ubuntu-latest
+    # Only run rank check at the top of each hour
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/10 1-14 * * *'
+    steps:
+      - name: Check if hour boundary
+        id: check-hour
+        run: |
+          MINUTE=$(date -u +%M)
+          if [ "$MINUTE" = "00" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run_ranks=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_ranks=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check Rank Changes
+        if: steps.check-hour.outputs.run_ranks == 'true'
+        run: |
+          echo "Checking rank changes at $(date)"
+          response=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://flt-kpi-api.onrender.com/api/v1/push/rank-change-check?api_key=${{ secrets.PUSH_API_KEY }}")
+
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+
+          echo "Response: $body"
+          echo "HTTP Status: $http_code"

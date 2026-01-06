@@ -4465,6 +4465,153 @@ async def notify_commission_earned(
     return result
 
 
+@app.post("/api/v1/push/commission-check")
+async def check_and_notify_commission_changes(
+    api_key: str = Query(..., description="API key for authentication")
+):
+    """Check for new commission earnings and notify staff.
+
+    Schedule every 10 minutes: */10 * * * * (during business hours 9am-10pm)
+
+    Compares current commission from mv_staff_daily_commission with cached values.
+    Sends notification when staff earns new commission (delta > 0).
+
+    This is the REAL-TIME commission notification system that Gen Z staff want!
+    """
+    expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
+    if api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    if not PUSH_AVAILABLE:
+        return {"success": False, "error": "Push notifications not available"}
+
+    notified = []
+    today = date.today()
+
+    try:
+        async with pool.acquire() as conn:
+            # Ensure cache table exists
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS kpi.staff_commission_cache (
+                    staff_id TEXT PRIMARY KEY,
+                    commission NUMERIC DEFAULT 0,
+                    checked_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+
+            # Get current commission from MV (today only)
+            current_commissions = await conn.fetch("""
+                SELECT staff_id, SUM(commission) as total_commission
+                FROM analytics.mv_staff_daily_commission
+                WHERE sale_date = $1
+                GROUP BY staff_id
+                HAVING SUM(commission) > 0
+            """, today)
+
+            # Get previous cached values
+            prev_cache = await conn.fetch("""
+                SELECT staff_id, commission FROM kpi.staff_commission_cache
+            """)
+            prev_map = {r['staff_id']: float(r['commission']) for r in prev_cache}
+
+            # Get subscribed staff
+            subscribed = await conn.fetch("""
+                SELECT DISTINCT staff_id FROM kpi.push_subscriptions
+            """)
+            subscribed_ids = {r['staff_id'] for r in subscribed}
+
+            # Check each staff for commission increases
+            for row in current_commissions:
+                staff_id = row['staff_id']
+                current = float(row['total_commission'])
+                previous = prev_map.get(staff_id, 0.0)
+                delta = current - previous
+
+                # Only notify if commission increased and staff is subscribed
+                if delta > 0 and staff_id in subscribed_ids:
+                    # Get staff name
+                    staff_row = await conn.fetchrow("""
+                        SELECT staff_name FROM kpi.staff_list_master WHERE staff_id = $1
+                    """, staff_id)
+                    staff_name = staff_row['staff_name'] if staff_row else staff_id
+
+                    # Generate notification
+                    message = random.choice(COMMISSION_MESSAGES).format(amount=delta)
+                    title = "💰 Commission Earned!"
+
+                    # Add context
+                    if delta >= 10:
+                        title = "🔥 Big Commission Alert!"
+                    elif delta >= 5:
+                        title = "⭐ Nice Commission!"
+
+                    detail = f"Today's total: RM{current:.2f} (+RM{delta:.2f})"
+
+                    # Save to notifications table
+                    try:
+                        await conn.execute("""
+                            INSERT INTO kpi.notifications (staff_id, title, message, type, data)
+                            VALUES ($1, $2, $3, 'commission', $4)
+                        """, staff_id, title, f"{message}\n{detail}",
+                        json.dumps({
+                            "delta": delta,
+                            "total": current,
+                            "date": str(today)
+                        }))
+                    except Exception as e:
+                        print(f"Failed to save commission notification: {e}")
+
+                    # Send push notification
+                    result = await send_push_to_staff(
+                        staff_id=staff_id,
+                        title=title,
+                        message=f"{message}\n{detail}",
+                        data={
+                            "type": "commission",
+                            "delta": delta,
+                            "total": current
+                        }
+                    )
+
+                    notified.append({
+                        "staff_id": staff_id,
+                        "staff_name": staff_name,
+                        "delta": delta,
+                        "total": current,
+                        "push_sent": result.get("success", False)
+                    })
+
+            # Update cache with current values
+            for row in current_commissions:
+                await conn.execute("""
+                    INSERT INTO kpi.staff_commission_cache (staff_id, commission, checked_at)
+                    VALUES ($1, $2, NOW())
+                    ON CONFLICT (staff_id) DO UPDATE SET
+                        commission = EXCLUDED.commission,
+                        checked_at = NOW()
+                """, row['staff_id'], row['total_commission'])
+
+            # Clean up cache at midnight (reset for new day)
+            # This is handled by checking if cache has stale date
+            await conn.execute("""
+                DELETE FROM kpi.staff_commission_cache
+                WHERE checked_at::date < $1
+            """, today)
+
+    except Exception as e:
+        print(f"Commission check error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+    return {
+        "success": True,
+        "checked": len(current_commissions) if 'current_commissions' in dir() else 0,
+        "notified": len(notified),
+        "details": notified
+    }
+
+
 @app.post("/api/v1/push/rank-change-check")
 async def check_and_notify_rank_changes(
     api_key: str = Query(..., description="API key for authentication")
