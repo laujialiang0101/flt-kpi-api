@@ -508,7 +508,7 @@ async def login(request: LoginRequest):
                     can_upload_targets, can_view_all_staff, can_manage_roles,
                     primary_outlet, primary_outlet_name,
                     allowed_outlets, allowed_outlet_names,
-                    is_active
+                    is_active, region, area_manager_id, area_manager_name
                 FROM kpi.staff_list_master
                 WHERE UPPER(staff_id) = UPPER($1)
                   AND is_active = true
@@ -575,7 +575,10 @@ async def login(request: LoginRequest):
                 'allowed_outlets': allowed_outlets,
                 'is_supervisor': staff['is_supervisor'],
                 'user_group': staff['pos_user_group'],
-                'permissions': permissions
+                'permissions': permissions,
+                'region': staff['region'],
+                'area_manager_id': staff['area_manager_id'],
+                'area_manager_name': staff['area_manager_name']
             }
 
             sessions[token] = {
@@ -645,7 +648,7 @@ async def refresh_session(token: str = Query(..., description="Session token")):
                     can_upload_targets, can_view_all_staff, can_manage_roles,
                     primary_outlet, primary_outlet_name,
                     allowed_outlets, allowed_outlet_names,
-                    is_active
+                    is_active, region, area_manager_id, area_manager_name
                 FROM kpi.staff_list_master
                 WHERE UPPER(staff_id) = UPPER($1)
                   AND is_active = true
@@ -692,7 +695,10 @@ async def refresh_session(token: str = Query(..., description="Session token")):
                 'allowed_outlets': allowed_outlets,
                 'is_supervisor': staff['is_supervisor'],
                 'user_group': staff['pos_user_group'],
-                'permissions': permissions
+                'permissions': permissions,
+                'region': staff['region'],
+                'area_manager_id': staff['area_manager_id'],
+                'area_manager_name': staff['area_manager_name']
             }
 
             sessions[token]['user'] = updated_user
@@ -3655,6 +3661,45 @@ async def get_view_status():
                 "checked_at": datetime.now().isoformat()
             }
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/api/v1/regions")
+async def get_regions():
+    """Get list of regions with their area managers.
+
+    Returns region data dynamically from staff_list_master.
+    Frontend can use this instead of hardcoding REGIONS constant.
+    """
+    try:
+        async with pool.acquire() as conn:
+            # Get unique regions with their area managers
+            rows = await conn.fetch("""
+                SELECT DISTINCT
+                    region,
+                    area_manager_name,
+                    area_manager_id
+                FROM kpi.staff_list_master
+                WHERE region IS NOT NULL AND is_active = true
+                ORDER BY region
+            """)
+
+            regions = {}
+            for row in rows:
+                region = row['region']
+                if region and region not in regions:
+                    regions[region] = {
+                        'code': region,
+                        'label': f"{region} - {row['area_manager_name']}" if row['area_manager_name'] else region,
+                        'area_manager_id': row['area_manager_id'],
+                        'area_manager_name': row['area_manager_name']
+                    }
+
+            return {
+                "success": True,
+                "regions": list(regions.values())
+            }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
