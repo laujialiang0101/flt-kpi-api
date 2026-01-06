@@ -366,13 +366,16 @@ app.add_middleware(GZipMiddleware, minimum_size=500)
 # Helper Functions
 # ============================================================================
 
-def get_role_from_group(user_group: str, is_supervisor: bool) -> str:
-    """Map AcPOSUserGroupID to application role."""
+def get_role_from_group(user_group: str, is_supervisor: bool = False) -> str:
+    """Map AcPOSUserGroupID to application role.
+    
+    Role is determined SOLELY by AcPOSUserGroupID (POS user group).
+    The IsSupervisor checkbox is NOT used for role determination.
+    """
     group = (user_group or '').upper().strip()
     role = ROLE_MAPPING.get(group, 'staff')
-    # Supervisor flag can override role
-    if is_supervisor and role not in ['admin', 'operations_manager']:
-        role = 'supervisor'
+    # Note: is_supervisor parameter kept for backwards compatibility but NOT used
+    # Role should be determined by POS user group only
     return role
 
 
@@ -658,6 +661,119 @@ async def logout(token: str = Query(..., description="Session token")):
     if token in sessions:
         del sessions[token]
     return {"success": True, "message": "Logged out successfully"}
+
+
+@app.post("/api/v1/auth/refresh-session")
+async def refresh_session(token: str = Query(..., description="Session token")):
+    """Refresh session data from database.
+
+    Use this to update user's role/permissions without requiring logout/login.
+    Useful when user's AcPOSUserGroupID has been changed in the database.
+    """
+    if token not in sessions:
+        return {"success": False, "error": "Invalid session"}
+
+    session = sessions[token]
+    if datetime.now() > session['expires_at']:
+        del sessions[token]
+        return {"success": False, "error": "Session expired"}
+
+    old_user = session['user']
+    user_code = old_user['code']
+
+    try:
+        async with pool.acquire() as conn:
+            # Re-fetch user data from database
+            user = await conn.fetchrow("""
+                SELECT
+                    "Code" as code,
+                    "Name" as name,
+                    "Active" as active,
+                    "IsSupervisor" as is_supervisor,
+                    "AcPOSUserGroupID" as user_group
+                FROM "AcPersonal"
+                WHERE UPPER("Code") = UPPER($1)
+                  AND "Active" = 'Y'
+            """, user_code)
+
+            if not user:
+                del sessions[token]
+                return {"success": False, "error": "User no longer active"}
+
+            # Recalculate role and permissions
+            is_supervisor = user['is_supervisor'] == 'Y'
+            role = get_role_from_group(user['user_group'], is_supervisor)
+            permissions = ROLE_PERMISSIONS.get(role, ROLE_PERMISSIONS['staff'])
+
+            # Get updated outlet access
+            allowed_outlets = []
+            outlet_id = None
+            group_id = None
+
+            if role in ['admin', 'operations_manager', 'area_manager']:
+                outlet_rows = await conn.fetch("""
+                    SELECT pl."AcLocationID", l."AcLocationDesc"
+                    FROM "AcPersonalLocationAs" pl
+                    LEFT JOIN "AcLocation" l ON pl."AcLocationID" = l."AcLocationID"
+                    WHERE pl."Code" = $1 AND pl."IsActiveAtPOS" = 'Y'
+                    ORDER BY pl."AcLocationID"
+                """, user['code'])
+                allowed_outlets = [
+                    {'id': row['AcLocationID'], 'name': row['AcLocationDesc'] or row['AcLocationID']}
+                    for row in outlet_rows
+                ]
+                outlet_id = None
+                group_id = None
+            else:
+                staff_info = await conn.fetchrow("""
+                    SELECT s."AcSalesmanGroupID" as group_id
+                    FROM "AcSalesman" s
+                    WHERE s."AcSalesmanID" = $1 AND s."Active" = 'Y'
+                """, user['code'])
+                if staff_info and staff_info['group_id']:
+                    group_id = staff_info['group_id']
+                    outlet_id = group_id
+                    location_check = await conn.fetchrow("""
+                        SELECT "AcLocationID", "AcLocationDesc"
+                        FROM "AcLocation"
+                        WHERE "AcLocationID" = $1
+                    """, group_id)
+                    if location_check:
+                        allowed_outlets = [
+                            {'id': outlet_id, 'name': location_check['AcLocationDesc'] or outlet_id}
+                        ]
+
+            # Update session with fresh data
+            updated_user = {
+                'code': user['code'],
+                'name': user['name'],
+                'role': role,
+                'outlet_id': outlet_id,
+                'group_id': group_id,
+                'allowed_outlets': allowed_outlets,
+                'is_supervisor': is_supervisor,
+                'user_group': user['user_group'],
+                'permissions': permissions
+            }
+
+            sessions[token]['user'] = updated_user
+
+            # Log the change if role changed
+            old_role = old_user.get('role', 'unknown')
+            if old_role != role:
+                print(f"[SESSION REFRESH] {user['name']} ({user_code}): role changed from '{old_role}' to '{role}'", flush=True)
+
+            return {
+                "success": True,
+                "message": "Session refreshed successfully",
+                "user": updated_user,
+                "role_changed": old_role != role,
+                "old_role": old_role,
+                "new_role": role
+            }
+
+    except Exception as e:
+        return {"success": False, "error": f"Failed to refresh session: {str(e)}"}
 
 
 @app.post("/api/v1/auth/set-password")
@@ -3437,16 +3553,35 @@ _last_refresh_result = None
 
 
 async def _do_background_refresh():
-    """Background task to refresh all materialized views."""
+    """Background task to refresh all materialized views.
+
+    IMPORTANT: Uses dedicated connection with 30-minute timeout instead of pool.
+    Pool connections have 60-second command_timeout which is too short for MV refresh.
+    """
     global _refresh_in_progress, _last_refresh_result
     import time
     start_time = time.time()
     results = {}
 
     try:
-        async with pool.acquire() as conn:
-            # Set longer timeout for MV refresh (15 min)
-            await conn.execute("SET statement_timeout = '900000'")
+        # Create dedicated connection with NO command timeout for MV refresh
+        # Pool connections have 60s command_timeout which causes TimeoutError
+        # MV refresh time scales with data size - should never timeout at Python level
+        # PostgreSQL statement_timeout provides the safety net (3 hours)
+        mv_conn = await asyncpg.connect(
+            host=connected_host or EXTERNAL_HOST,
+            port=DB_PORT,
+            database=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            ssl='require' if (connected_host or EXTERNAL_HOST) == EXTERNAL_HOST else None,
+            command_timeout=None,  # No Python timeout - let PostgreSQL handle it
+        )
+
+        try:
+            # Set PostgreSQL statement timeout as safety net (3 hours)
+            # This ensures runaway queries eventually terminate
+            await mv_conn.execute("SET statement_timeout = '10800000'")  # 3 hours
 
             views = [
                 'analytics.mv_staff_daily_kpi',
@@ -3457,13 +3592,13 @@ async def _do_background_refresh():
             for view in views:
                 view_start = time.time()
                 try:
-                    await conn.execute(f'REFRESH MATERIALIZED VIEW CONCURRENTLY {view}')
+                    await mv_conn.execute(f'REFRESH MATERIALIZED VIEW CONCURRENTLY {view}')
                 except Exception as e:
                     error_type = type(e).__name__
                     error_msg = str(e) or repr(e)
                     if 'unique index' in error_msg.lower() or 'does not exist' in error_msg.lower():
                         try:
-                            await conn.execute(f'REFRESH MATERIALIZED VIEW {view}')
+                            await mv_conn.execute(f'REFRESH MATERIALIZED VIEW {view}')
                         except Exception as e2:
                             results[view] = f"skipped: {type(e2).__name__}: {str(e2)[:40]}"
                             continue
@@ -3472,12 +3607,15 @@ async def _do_background_refresh():
                         continue
                 results[view] = round(time.time() - view_start, 1)
 
-        _last_refresh_result = {
-            "success": True,
-            "timing": results,
-            "total_seconds": round(time.time() - start_time, 1),
-            "completed_at": datetime.now().isoformat()
-        }
+            _last_refresh_result = {
+                "success": True,
+                "timing": results,
+                "total_seconds": round(time.time() - start_time, 1),
+                "completed_at": datetime.now().isoformat()
+            }
+        finally:
+            await mv_conn.close()
+
     except Exception as e:
         _last_refresh_result = {
             "success": False,
@@ -4248,6 +4386,947 @@ async def get_outlet_targets(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching outlet targets: {str(e)}")
+
+
+# ============================================================================
+# GEN Z MOTIVATION NOTIFICATION SYSTEM
+# ============================================================================
+# Designed to engage Gen Z staff with dopamine-triggering notifications:
+# - Instant commission earned alerts
+# - Ranking change celebrations
+# - Target milestone achievements
+# - Streak and badge unlocks
+
+# Gen Z Achievement Messages - Short, punchy, emoji-rich
+COMMISSION_MESSAGES = [
+    "Ka-ching! 💸 You just earned RM{amount:.2f}!",
+    "Money moves! 💰 RM{amount:.2f} commission unlocked!",
+    "Bag secured! 🎒 +RM{amount:.2f} to your pocket!",
+    "Cha-ching! 🤑 RM{amount:.2f} earned!",
+    "Get that bread! 🍞 +RM{amount:.2f}!",
+]
+
+RANK_UP_MESSAGES = [
+    "Level up! 🚀 You climbed to #{rank}!",
+    "Main character energy! 🌟 Now ranked #{rank}!",
+    "Plot twist! 📈 You're #{rank} now!",
+    "Glow up alert! ✨ Jumped to #{rank}!",
+    "Era upgrade! 🔥 #{rank} in the company!",
+]
+
+TARGET_MILESTONE_MESSAGES = {
+    25: ["Quarter way there! ⚡ 25% of target done!", "Loading progress... 25% 📊"],
+    50: ["Halfway slay! 🔥 50% target achieved!", "50% vibes only! ✌️"],
+    75: ["Almost there bestie! 💪 75% complete!", "Three quarters down! 🎯"],
+    100: ["TARGET CLEARED! 🏆 You did THAT!", "100% slayed! Legend status! 👑"],
+    125: ["OVERACHIEVER! 🚀 125% - You're built different!", "Exceeded expectations! Extra credit! 🌟"],
+    150: ["UNSTOPPABLE! 💎 150% - absolute legend!", "You're HIM/HER! 150%! 👑🔥"],
+}
+
+STREAK_MESSAGES = {
+    3: "3-day streak! 🔥 Hat trick energy!",
+    5: "5-day streak! ⭐ Consistency is key!",
+    7: "WEEKLY WARRIOR! 🗓️ 7 days strong!",
+    14: "TWO WEEK TITAN! 💪 Unstoppable!",
+    30: "MONTHLY MASTER! 🏆 30-day legend!",
+}
+
+FIRST_TIME_ACHIEVEMENTS = {
+    "first_sale": "First sale secured! 🎉 Welcome to the game!",
+    "first_hb": "First House Brand sold! 🏠 Brand ambassador unlocked!",
+    "first_100": "First RM100+ sale! 💯 Big fish energy!",
+    "first_rank_top10": "TOP 10 debut! 🔟 You're in the elite now!",
+    "first_target": "First target achieved! 🎯 Champion mode activated!",
+}
+
+
+class CommissionSaleEvent(BaseModel):
+    """Event for commission-eligible sale."""
+    staff_id: str
+    staff_name: str
+    product_name: str
+    quantity: float
+    sale_amount: float
+    commission_earned: float
+    sale_category: str  # house_brand, focused_1, etc.
+
+
+class RankCheckResult(BaseModel):
+    """Result of rank change detection."""
+    staff_id: str
+    staff_name: str
+    old_rank: int
+    new_rank: int
+    rank_change: int  # positive = improved
+
+
+@app.post("/api/v1/push/commission-earned")
+async def notify_commission_earned(
+    event: CommissionSaleEvent,
+    api_key: str = Query(..., description="API key for authentication")
+):
+    """Instantly notify staff when they earn commission from a sale.
+
+    Call this from sync service when detecting KPI-category sales.
+    Gen Z staff love instant gratification - this provides dopamine hit!
+    """
+    expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
+    if api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    if event.commission_earned <= 0:
+        return {"success": False, "reason": "No commission to report"}
+
+    # Generate engaging message
+    message = random.choice(COMMISSION_MESSAGES).format(amount=event.commission_earned)
+
+    # Add product context
+    product_short = (event.product_name or "item")[:25]
+    detail = f"Sold {event.quantity:.0f}x {product_short} (RM{event.sale_amount:.2f})"
+
+    title_map = {
+        "house_brand": "🏠 House Brand Commission!",
+        "focused_1": "🎯 Focused 1 Commission!",
+        "focused_2": "⭐ Focused 2 Commission!",
+        "focused_3": "🌟 Focused 3 Commission!",
+        "pwp": "🛒 PWP Commission!",
+        "clearance": "📦 Clearance Commission!",
+    }
+    title = title_map.get(event.sale_category, "💰 Commission Earned!")
+
+    # Save to notifications table
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO kpi.notifications (staff_id, title, message, type, data)
+                VALUES ($1, $2, $3, 'commission', $4)
+            """, event.staff_id, title, f"{message}\n{detail}",
+            json.dumps({
+                "commission": event.commission_earned,
+                "sale_amount": event.sale_amount,
+                "product": event.product_name,
+                "category": event.sale_category
+            }))
+    except Exception as e:
+        print(f"Failed to save commission notification: {e}")
+
+    # Send push
+    result = await send_push_to_staff(
+        staff_id=event.staff_id,
+        title=title,
+        message=f"{message}\n{detail}",
+        data={
+            "type": "commission",
+            "commission": event.commission_earned,
+            "category": event.sale_category
+        }
+    )
+
+    return result
+
+
+@app.post("/api/v1/push/rank-change-check")
+async def check_and_notify_rank_changes(
+    api_key: str = Query(..., description="API key for authentication")
+):
+    """Check for significant rank changes and notify staff.
+
+    Schedule hourly: 0 * * * * (every hour during business hours)
+
+    Triggers notification when:
+    - Staff moves up 3+ positions
+    - Staff enters top 10
+    - Staff becomes #1
+    """
+    expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
+    if api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    if not PUSH_AVAILABLE:
+        return {"success": False, "error": "Push notifications not available"}
+
+    notified = []
+
+    try:
+        async with pool.acquire() as conn:
+            # Get current rankings vs cached previous rankings
+            # We store previous rankings in kpi.staff_rank_cache
+
+            # Ensure cache table exists
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS kpi.staff_rank_cache (
+                    staff_id TEXT PRIMARY KEY,
+                    company_rank INTEGER,
+                    checked_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+
+            # Get current rankings from MV
+            current_ranks = await conn.fetch("""
+                SELECT staff_id, company_rank_sales as company_rank
+                FROM analytics.mv_staff_rankings
+                WHERE company_rank_sales IS NOT NULL
+            """)
+
+            # Get previous rankings
+            prev_ranks = await conn.fetch("""
+                SELECT staff_id, company_rank FROM kpi.staff_rank_cache
+            """)
+            prev_map = {r['staff_id']: r['company_rank'] for r in prev_ranks}
+
+            # Check subscribed staff for significant changes
+            subscribed = await conn.fetch("""
+                SELECT DISTINCT staff_id FROM kpi.push_subscriptions
+            """)
+            subscribed_ids = {r['staff_id'] for r in subscribed}
+
+            for row in current_ranks:
+                staff_id = row['staff_id']
+                new_rank = row['company_rank']
+                old_rank = prev_map.get(staff_id)
+
+                if staff_id not in subscribed_ids:
+                    continue
+
+                if old_rank is None:
+                    # First time seeing this staff, just cache
+                    continue
+
+                rank_change = old_rank - new_rank  # positive = improved
+
+                # Notify if significant improvement
+                should_notify = False
+                special_message = None
+
+                if new_rank == 1 and old_rank != 1:
+                    should_notify = True
+                    special_message = "👑 CROWNED #1! You're the TOP performer! 👑"
+                elif new_rank <= 10 and old_rank > 10:
+                    should_notify = True
+                    special_message = f"🏅 TOP 10 ENTRY! You broke into #{new_rank}!"
+                elif rank_change >= 5:
+                    should_notify = True
+                    special_message = f"🚀 MASSIVE CLIMB! Jumped {rank_change} spots to #{new_rank}!"
+                elif rank_change >= 3:
+                    should_notify = True
+
+                if should_notify:
+                    message = special_message or random.choice(RANK_UP_MESSAGES).format(rank=new_rank)
+
+                    try:
+                        await send_push_to_staff(
+                            staff_id=staff_id,
+                            title="📈 Rank Up!",
+                            message=message,
+                            data={
+                                "type": "rank_change",
+                                "old_rank": old_rank,
+                                "new_rank": new_rank,
+                                "change": rank_change
+                            }
+                        )
+                        notified.append({
+                            "staff_id": staff_id,
+                            "old_rank": old_rank,
+                            "new_rank": new_rank
+                        })
+                    except Exception as e:
+                        print(f"Failed to notify {staff_id}: {e}")
+
+            # Update cache with current rankings
+            for row in current_ranks:
+                await conn.execute("""
+                    INSERT INTO kpi.staff_rank_cache (staff_id, company_rank, checked_at)
+                    VALUES ($1, $2, NOW())
+                    ON CONFLICT (staff_id) DO UPDATE SET
+                        company_rank = EXCLUDED.company_rank,
+                        checked_at = NOW()
+                """, row['staff_id'], row['company_rank'])
+
+        return {
+            "success": True,
+            "notified_count": len(notified),
+            "notified": notified,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Rank check failed: {str(e)}")
+
+
+@app.post("/api/v1/push/milestone-check")
+async def check_and_notify_milestones(
+    api_key: str = Query(..., description="API key for authentication")
+):
+    """Check milestone progress and notify - both achievements AND falling behind.
+
+    Logic:
+    - Staff achieved milestone EARLY → Celebrate! "X days ahead of schedule!"
+    - Staff BEHIND expected milestone → Motivate! "Time to catch up!"
+
+    E.g., Day 15 of 30 = expected 50%.
+    - If staff at 60% → "Ahead! Keep it up!"
+    - If staff at 35% → "15% behind pace, you can catch up!"
+
+    Milestones: 25%, 50%, 75%, 100%
+    Only notifies once per milestone per month (for achievements).
+    Behind-pace alerts sent once per week max.
+    """
+    expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
+    if api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    if not PUSH_AVAILABLE:
+        return {"success": False, "error": "Push notifications not available"}
+
+    today = date.today()
+    year_month = int(today.strftime('%Y%m'))
+
+    # Calculate expected progress based on day of month
+    days_in_month = (date(today.year, today.month + 1 if today.month < 12 else 1, 1) - timedelta(days=1)).day if today.month < 12 else 31
+    day_of_month = today.day
+    expected_progress_pct = (day_of_month / days_in_month) * 100
+
+    notified_ahead = []
+    notified_behind = []
+
+    # Gen Z motivational messages for falling behind
+    BEHIND_MESSAGES = [
+        "Time to level up! You've got this! 💪",
+        "Comeback arc starts NOW! 🔥",
+        "Still time to turn it around! Let's go! ⚡",
+        "Challenge accepted? Let's close that gap! 🎯",
+        "Plot twist incoming - make it happen! 📈",
+    ]
+
+    try:
+        async with pool.acquire() as conn:
+            # Ensure milestone tracking table exists
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS kpi.milestone_notifications (
+                    staff_id TEXT,
+                    year_month INTEGER,
+                    milestone INTEGER,
+                    notified_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (staff_id, year_month, milestone)
+                )
+            """)
+
+            # Ensure behind-pace tracking table exists (to avoid spamming)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS kpi.behind_pace_notifications (
+                    staff_id TEXT,
+                    year_month INTEGER,
+                    last_notified DATE,
+                    PRIMARY KEY (staff_id, year_month)
+                )
+            """)
+
+            # Get subscribed staff with targets and MTD
+            staff_progress = await conn.fetch("""
+                WITH subscribed AS (
+                    SELECT DISTINCT staff_id FROM kpi.push_subscriptions
+                ),
+                mtd AS (
+                    SELECT staff_id, SUM(total_sales) as mtd_sales
+                    FROM analytics.mv_staff_daily_kpi
+                    WHERE EXTRACT(YEAR FROM sale_date) = $1
+                      AND EXTRACT(MONTH FROM sale_date) = $2
+                    GROUP BY staff_id
+                )
+                SELECT
+                    s.staff_id,
+                    COALESCE(m.mtd_sales, 0) as mtd_sales,
+                    COALESCE(t.total_sales_target, 0) as target
+                FROM subscribed s
+                LEFT JOIN mtd m ON s.staff_id = m.staff_id
+                LEFT JOIN "KPITargets" t ON s.staff_id = t.salesman_id AND t.year_month = $3
+                WHERE COALESCE(t.total_sales_target, 0) > 0
+            """, today.year, today.month, year_month)
+
+            # Get already-notified milestones (for achievements)
+            notified_milestones = await conn.fetch("""
+                SELECT staff_id, milestone FROM kpi.milestone_notifications
+                WHERE year_month = $1
+            """, year_month)
+            notified_set = {(r['staff_id'], r['milestone']) for r in notified_milestones}
+
+            # Get recent behind-pace notifications (max once per week)
+            recent_behind = await conn.fetch("""
+                SELECT staff_id, last_notified FROM kpi.behind_pace_notifications
+                WHERE year_month = $1 AND last_notified > $2
+            """, year_month, today - timedelta(days=7))
+            recent_behind_set = {r['staff_id'] for r in recent_behind}
+
+            # Milestones to check
+            milestones = [25, 50, 75, 100]
+
+            for staff in staff_progress:
+                staff_id = staff['staff_id']
+                mtd = float(staff['mtd_sales'] or 0)
+                target = float(staff['target'] or 0)
+
+                if target <= 0:
+                    continue
+
+                progress_pct = (mtd / target) * 100
+                gap_pct = expected_progress_pct - progress_pct
+
+                # === CHECK FOR ACHIEVED MILESTONES (EARLY) ===
+                for milestone in milestones:
+                    if progress_pct >= milestone and (staff_id, milestone) not in notified_set:
+                        # Calculate if achieved early
+                        expected_day_for_milestone = (milestone / 100) * days_in_month
+                        days_ahead = expected_day_for_milestone - day_of_month
+
+                        if days_ahead >= 1:
+                            # Achieved EARLY - celebrate!
+                            messages = TARGET_MILESTONE_MESSAGES.get(milestone, [f"{milestone}% achieved! 🎯"])
+                            message = random.choice(messages) if isinstance(messages, list) else messages
+                            ahead_msg = f"{int(days_ahead)} days ahead of schedule!"
+
+                            if milestone >= 100:
+                                title = "🏆 TARGET SMASHED EARLY!"
+                            else:
+                                title = "⚡ Ahead of Target!"
+                            full_message = f"{message}\n{ahead_msg}"
+                        else:
+                            # Achieved on time or slightly late - still celebrate
+                            messages = TARGET_MILESTONE_MESSAGES.get(milestone, [f"{milestone}% achieved! 🎯"])
+                            message = random.choice(messages) if isinstance(messages, list) else messages
+
+                            if milestone >= 100:
+                                title = "🏆 TARGET ACHIEVED!"
+                            else:
+                                title = "🎯 Milestone Reached!"
+                            full_message = message
+
+                        try:
+                            await send_push_to_staff(
+                                staff_id=staff_id,
+                                title=title,
+                                message=full_message,
+                                data={
+                                    "type": "milestone_achieved",
+                                    "milestone": milestone,
+                                    "days_ahead": max(0, days_ahead),
+                                    "mtd": mtd,
+                                    "target": target
+                                }
+                            )
+
+                            # Record notification
+                            await conn.execute("""
+                                INSERT INTO kpi.milestone_notifications (staff_id, year_month, milestone)
+                                VALUES ($1, $2, $3)
+                                ON CONFLICT DO NOTHING
+                            """, staff_id, year_month, milestone)
+
+                            notified_ahead.append({
+                                "staff_id": staff_id,
+                                "milestone": milestone,
+                                "status": "achieved",
+                                "days_ahead": round(max(0, days_ahead), 1)
+                            })
+                        except Exception as e:
+                            print(f"Failed to notify {staff_id} for {milestone}%: {e}")
+
+                # === CHECK FOR FALLING BEHIND ===
+                # Only alert if significantly behind (>10% gap) and not recently notified
+                if gap_pct >= 10 and staff_id not in recent_behind_set:
+                    # Find which milestone they should have hit by now
+                    expected_milestone = None
+                    for m in milestones:
+                        if expected_progress_pct >= m and progress_pct < m:
+                            expected_milestone = m
+                            break
+
+                    if expected_milestone or gap_pct >= 15:
+                        motivation = random.choice(BEHIND_MESSAGES)
+                        gap_amount = (gap_pct / 100) * target
+
+                        if expected_milestone:
+                            title = f"📊 {expected_milestone}% Check-In"
+                            msg = f"You're at {progress_pct:.0f}% (expected {expected_progress_pct:.0f}%)\nGap: RM{gap_amount:,.0f} | {motivation}"
+                        else:
+                            title = "📊 Progress Check"
+                            msg = f"Currently {progress_pct:.0f}% vs expected {expected_progress_pct:.0f}%\n{motivation}"
+
+                        try:
+                            await send_push_to_staff(
+                                staff_id=staff_id,
+                                title=title,
+                                message=msg,
+                                data={
+                                    "type": "behind_pace",
+                                    "current_pct": progress_pct,
+                                    "expected_pct": expected_progress_pct,
+                                    "gap_pct": gap_pct,
+                                    "mtd": mtd,
+                                    "target": target
+                                }
+                            )
+
+                            # Record to avoid spamming
+                            await conn.execute("""
+                                INSERT INTO kpi.behind_pace_notifications (staff_id, year_month, last_notified)
+                                VALUES ($1, $2, $3)
+                                ON CONFLICT (staff_id, year_month) DO UPDATE SET last_notified = $3
+                            """, staff_id, year_month, today)
+
+                            notified_behind.append({
+                                "staff_id": staff_id,
+                                "status": "behind",
+                                "current_pct": round(progress_pct, 1),
+                                "expected_pct": round(expected_progress_pct, 1),
+                                "gap_pct": round(gap_pct, 1)
+                            })
+                        except Exception as e:
+                            print(f"Failed to notify {staff_id} for behind pace: {e}")
+
+        return {
+            "success": True,
+            "notified_ahead": len(notified_ahead),
+            "notified_behind": len(notified_behind),
+            "details": {
+                "ahead": notified_ahead,
+                "behind": notified_behind
+            },
+            "expected_progress": round(expected_progress_pct, 1),
+            "day_of_month": day_of_month,
+            "days_in_month": days_in_month,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Milestone check failed: {str(e)}")
+
+
+@app.post("/api/v1/push/streak-check")
+async def check_and_notify_streaks(
+    api_key: str = Query(..., description="API key for authentication")
+):
+    """Check for consecutive day streaks and notify.
+
+    Schedule daily at 11pm: 0 23 * * *
+
+    Streaks tracked:
+    - Consecutive days with sales
+    - Consecutive days meeting daily target
+    """
+    expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
+    if api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    if not PUSH_AVAILABLE:
+        return {"success": False, "error": "Push notifications not available"}
+
+    today = date.today()
+    notified = []
+
+    try:
+        async with pool.acquire() as conn:
+            # Get subscribed staff
+            subscribed = await conn.fetch("""
+                SELECT DISTINCT staff_id FROM kpi.push_subscriptions
+            """)
+
+            for sub in subscribed:
+                staff_id = sub['staff_id']
+
+                # Calculate streak: consecutive days with sales
+                streak_data = await conn.fetch("""
+                    WITH daily_sales AS (
+                        SELECT sale_date, SUM(total_sales) as daily_total
+                        FROM analytics.mv_staff_daily_kpi
+                        WHERE staff_id = $1 AND sale_date <= $2
+                        GROUP BY sale_date
+                        ORDER BY sale_date DESC
+                    ),
+                    streak AS (
+                        SELECT sale_date, daily_total,
+                               ROW_NUMBER() OVER (ORDER BY sale_date DESC) as rn,
+                               $2::date - sale_date::date as days_ago
+                        FROM daily_sales
+                        WHERE daily_total > 0
+                    )
+                    SELECT COUNT(*) as streak_days
+                    FROM streak
+                    WHERE days_ago = rn - 1
+                """, staff_id, today)
+
+                streak_days = int(streak_data[0]['streak_days']) if streak_data else 0
+
+                # Check if this is a milestone streak
+                milestone_streaks = [3, 5, 7, 14, 30]
+
+                if streak_days in milestone_streaks:
+                    message = STREAK_MESSAGES.get(streak_days, f"{streak_days}-day streak! 🔥")
+
+                    try:
+                        await send_push_to_staff(
+                            staff_id=staff_id,
+                            title="🔥 Streak Milestone!",
+                            message=message,
+                            data={"type": "streak", "days": streak_days}
+                        )
+                        notified.append({"staff_id": staff_id, "streak": streak_days})
+                    except Exception as e:
+                        print(f"Failed to notify streak for {staff_id}: {e}")
+
+        return {
+            "success": True,
+            "notified_count": len(notified),
+            "notified": notified,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Streak check failed: {str(e)}")
+
+
+@app.get("/api/v1/achievements/{staff_id}")
+async def get_staff_achievements(staff_id: str):
+    """Get all achievements/badges for a staff member.
+
+    Returns earned badges and progress toward next ones.
+    Great for gamification display in the app.
+    """
+    today = date.today()
+    year_month = int(today.strftime('%Y%m'))
+
+    try:
+        async with pool.acquire() as conn:
+            # Get various achievement data
+            stats = await conn.fetchrow("""
+                WITH mtd AS (
+                    SELECT
+                        SUM(total_sales) as mtd_sales,
+                        SUM(house_brand_sales) as mtd_hb,
+                        SUM(transactions) as mtd_trans,
+                        COUNT(DISTINCT sale_date) as active_days
+                    FROM analytics.mv_staff_daily_kpi
+                    WHERE staff_id = $1
+                      AND EXTRACT(YEAR FROM sale_date) = $2
+                      AND EXTRACT(MONTH FROM sale_date) = $3
+                ),
+                all_time AS (
+                    SELECT
+                        SUM(total_sales) as total_sales,
+                        COUNT(DISTINCT sale_date) as total_days
+                    FROM analytics.mv_staff_daily_kpi
+                    WHERE staff_id = $1
+                ),
+                ranking AS (
+                    SELECT company_rank_sales FROM analytics.mv_staff_rankings
+                    WHERE staff_id = $1
+                )
+                SELECT
+                    COALESCE(m.mtd_sales, 0) as mtd_sales,
+                    COALESCE(m.mtd_hb, 0) as mtd_hb,
+                    COALESCE(m.mtd_trans, 0) as mtd_trans,
+                    COALESCE(m.active_days, 0) as active_days,
+                    COALESCE(a.total_sales, 0) as total_sales,
+                    COALESCE(a.total_days, 0) as total_days,
+                    r.company_rank_sales as current_rank
+                FROM mtd m, all_time a
+                LEFT JOIN ranking r ON true
+            """, staff_id, today.year, today.month)
+
+            # Get target
+            target = await conn.fetchrow("""
+                SELECT total_sales_target FROM "KPITargets"
+                WHERE salesman_id = $1 AND year_month = $2
+            """, staff_id, year_month)
+
+            target_sales = float(target['total_sales_target'] or 0) if target else 0
+
+            achievements = []
+
+            # Sales Milestones
+            total_sales = float(stats['total_sales'] or 0)
+            if total_sales >= 1000000:
+                achievements.append({"id": "million_club", "name": "Million Club", "icon": "💎", "desc": "RM1M+ lifetime sales"})
+            elif total_sales >= 500000:
+                achievements.append({"id": "half_million", "name": "Half Million Hero", "icon": "🏆", "desc": "RM500K+ lifetime sales"})
+            elif total_sales >= 100000:
+                achievements.append({"id": "100k_club", "name": "100K Club", "icon": "🥇", "desc": "RM100K+ lifetime sales"})
+
+            # Ranking Achievements
+            current_rank = stats['current_rank']
+            if current_rank == 1:
+                achievements.append({"id": "top1", "name": "The Champion", "icon": "👑", "desc": "Currently #1 in company"})
+            elif current_rank and current_rank <= 3:
+                achievements.append({"id": "top3", "name": "Podium Finisher", "icon": "🥈", "desc": "Top 3 in company"})
+            elif current_rank and current_rank <= 10:
+                achievements.append({"id": "top10", "name": "Elite 10", "icon": "🔟", "desc": "Top 10 in company"})
+
+            # Consistency Achievements
+            active_days = stats['active_days']
+            if active_days >= 25:
+                achievements.append({"id": "consistent", "name": "Iron Will", "icon": "💪", "desc": "25+ active days this month"})
+            elif active_days >= 20:
+                achievements.append({"id": "regular", "name": "Regular", "icon": "📅", "desc": "20+ active days this month"})
+
+            # Target Achievements
+            mtd_sales = float(stats['mtd_sales'] or 0)
+            if target_sales > 0:
+                progress = (mtd_sales / target_sales) * 100
+                if progress >= 150:
+                    achievements.append({"id": "overachiever", "name": "Overachiever", "icon": "🚀", "desc": "150%+ of target"})
+                elif progress >= 100:
+                    achievements.append({"id": "target_met", "name": "Target Met", "icon": "🎯", "desc": "Monthly target achieved"})
+
+            return {
+                "success": True,
+                "staff_id": staff_id,
+                "achievements": achievements,
+                "stats": {
+                    "mtd_sales": round(mtd_sales, 2),
+                    "total_sales": round(total_sales, 2),
+                    "current_rank": current_rank,
+                    "active_days": active_days,
+                    "target_progress": round((mtd_sales / target_sales * 100), 1) if target_sales > 0 else None
+                }
+            }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching achievements: {str(e)}")
+
+
+# ============================================================================
+# Twice-Daily Progress Check (12pm and 6pm)
+# ============================================================================
+
+# Midday check-in messages (12pm) - encouraging, motivating to push harder
+MIDDAY_MESSAGES_AHEAD = [
+    "Killing it! 🔥 Keep this energy going!",
+    "You're on fire today! 💪 Maintain the momentum!",
+    "Slaying the daily target! ✨ Don't stop now!",
+    "Main character energy! 🌟 Afternoon = more wins!",
+]
+
+MIDDAY_MESSAGES_BEHIND = [
+    "Afternoon comeback loading... 💪",
+    "Second half is YOUR half! 🏃",
+    "Plot twist incoming! 📈",
+    "Time to turn it around! ⚡",
+]
+
+MIDDAY_MESSAGES_ON_TRACK = [
+    "On track! Solid morning! 👍",
+    "Looking good! Keep the pace! 🎯",
+    "Nice steady progress! 📊",
+]
+
+# End of day messages (6pm) - celebrating or encouraging for tomorrow
+EOD_MESSAGES_CRUSHED = [
+    "DAILY TARGET CRUSHED! 🏆 Legend status!",
+    "You did THAT today! 💅 Rest well, champion!",
+    "Target? Destroyed! 💥 Tomorrow we go again!",
+]
+
+EOD_MESSAGES_CLOSE = [
+    "So close! 🎯 A few more sales and you're there!",
+    "Almost at target! Final push! 💪",
+    "You've got this! Just a bit more! ⚡",
+]
+
+EOD_MESSAGES_BEHIND = [
+    "Tomorrow is a new day! 🌅 Fresh start incoming!",
+    "Every day is a chance to level up! 📈",
+    "Rest up, comeback arc starts tomorrow! 💪",
+]
+
+
+@app.post("/api/v1/push/daily-progress-check")
+async def send_daily_progress_check(
+    time_of_day: str = Query(..., description="midday or evening"),
+    api_key: str = Query(..., description="API key for authentication")
+):
+    """Send twice-daily progress check comparing today's sales vs daily target.
+
+    Schedule:
+    - Midday (12pm): 0 12 * * 1-6 (Mon-Sat at noon)
+    - Evening (6pm): 0 18 * * 1-6 (Mon-Sat at 6pm)
+
+    Compares today's sales against daily target (monthly target / days in month).
+    """
+    expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
+    if api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    if not PUSH_AVAILABLE:
+        return {"success": False, "error": "Push notifications not available"}
+
+    if time_of_day not in ["midday", "evening"]:
+        raise HTTPException(status_code=400, detail="time_of_day must be 'midday' or 'evening'")
+
+    today = date.today()
+    year_month = int(today.strftime('%Y%m'))
+
+    # Calculate daily target from monthly target
+    days_in_month = (date(today.year, today.month + 1 if today.month < 12 else 1, 1) - timedelta(days=1)).day if today.month < 12 else 31
+    # Assume ~26 working days per month for realistic daily target
+    working_days = 26
+
+    sent_count = 0
+    errors = []
+
+    try:
+        async with pool.acquire() as conn:
+            # Get subscribed staff with today's sales and monthly target
+            staff_data = await conn.fetch("""
+                WITH subscribed AS (
+                    SELECT DISTINCT staff_id FROM kpi.push_subscriptions
+                ),
+                today_sales AS (
+                    SELECT staff_id, SUM(total_sales) as today_total
+                    FROM analytics.mv_staff_daily_kpi
+                    WHERE sale_date = $1
+                    GROUP BY staff_id
+                ),
+                mtd_sales AS (
+                    SELECT staff_id, SUM(total_sales) as mtd_total
+                    FROM analytics.mv_staff_daily_kpi
+                    WHERE EXTRACT(YEAR FROM sale_date) = $2
+                      AND EXTRACT(MONTH FROM sale_date) = $3
+                    GROUP BY staff_id
+                )
+                SELECT
+                    s.staff_id,
+                    COALESCE(d.today_total, 0) as today_sales,
+                    COALESCE(m.mtd_total, 0) as mtd_sales,
+                    COALESCE(t.total_sales_target, 0) as monthly_target
+                FROM subscribed s
+                LEFT JOIN today_sales d ON s.staff_id = d.staff_id
+                LEFT JOIN mtd_sales m ON s.staff_id = m.staff_id
+                LEFT JOIN "KPITargets" t ON s.staff_id = t.salesman_id AND t.year_month = $4
+            """, today, today.year, today.month, year_month)
+
+            for staff in staff_data:
+                staff_id = staff['staff_id']
+                today_sales = float(staff['today_sales'] or 0)
+                mtd_sales = float(staff['mtd_sales'] or 0)
+                monthly_target = float(staff['monthly_target'] or 0)
+
+                # Calculate daily target
+                daily_target = monthly_target / working_days if monthly_target > 0 else 0
+
+                if daily_target <= 0:
+                    # No target set - still send a simple update
+                    if today_sales > 0:
+                        title = "📊 Today's Progress"
+                        msg = f"Today: RM{today_sales:,.0f} | MTD: RM{mtd_sales:,.0f}"
+                    else:
+                        continue  # Skip if no target and no sales
+                else:
+                    # Calculate progress against daily target
+                    daily_progress_pct = (today_sales / daily_target) * 100
+
+                    if time_of_day == "midday":
+                        # Midday: expect ~50% of daily target by noon
+                        if daily_progress_pct >= 60:
+                            title = "🔥 Midday Check-In"
+                            motivation = random.choice(MIDDAY_MESSAGES_AHEAD)
+                        elif daily_progress_pct >= 40:
+                            title = "📊 Midday Check-In"
+                            motivation = random.choice(MIDDAY_MESSAGES_ON_TRACK)
+                        else:
+                            title = "💪 Midday Check-In"
+                            motivation = random.choice(MIDDAY_MESSAGES_BEHIND)
+
+                        gap = daily_target - today_sales
+                        if gap > 0:
+                            msg = f"Today: RM{today_sales:,.0f} / RM{daily_target:,.0f} ({daily_progress_pct:.0f}%)\nGap: RM{gap:,.0f} | {motivation}"
+                        else:
+                            msg = f"Today: RM{today_sales:,.0f} / RM{daily_target:,.0f} ({daily_progress_pct:.0f}%)\n{motivation}"
+
+                    else:  # evening
+                        if daily_progress_pct >= 100:
+                            title = "🏆 Daily Target Achieved!"
+                            motivation = random.choice(EOD_MESSAGES_CRUSHED)
+                            msg = f"Today: RM{today_sales:,.0f} ({daily_progress_pct:.0f}% of daily target!)\n{motivation}"
+                        elif daily_progress_pct >= 80:
+                            title = "⚡ Almost There!"
+                            motivation = random.choice(EOD_MESSAGES_CLOSE)
+                            gap = daily_target - today_sales
+                            msg = f"Today: RM{today_sales:,.0f} / RM{daily_target:,.0f} ({daily_progress_pct:.0f}%)\nJust RM{gap:,.0f} more! {motivation}"
+                        else:
+                            title = "🌙 Day's Wrap Up"
+                            motivation = random.choice(EOD_MESSAGES_BEHIND)
+                            msg = f"Today: RM{today_sales:,.0f} / RM{daily_target:,.0f} ({daily_progress_pct:.0f}%)\n{motivation}"
+
+                try:
+                    await send_push_to_staff(
+                        staff_id=staff_id,
+                        title=title,
+                        message=msg,
+                        data={
+                            "type": f"daily_progress_{time_of_day}",
+                            "today_sales": today_sales,
+                            "daily_target": daily_target,
+                            "mtd_sales": mtd_sales,
+                            "monthly_target": monthly_target
+                        }
+                    )
+                    sent_count += 1
+                except Exception as e:
+                    errors.append(f"{staff_id}: {str(e)}")
+
+        return {
+            "success": True,
+            "time_of_day": time_of_day,
+            "sent_count": sent_count,
+            "errors": errors[:10] if errors else [],
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Daily progress check failed: {str(e)}")
+
+
+@app.post("/api/v1/push/daily-rank-check")
+async def run_daily_rank_and_milestone_check(
+    api_key: str = Query(..., description="API key for authentication")
+):
+    """Daily check for rank changes and ahead-of-target milestones.
+
+    Schedule: 0 21 * * * (daily at 9pm, after business hours)
+
+    Runs:
+    - Rank change check (notify significant rank improvements)
+    - Ahead-of-target milestone check (notify early achievers)
+    """
+    expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
+    if api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    results = {}
+
+    # Run rank check
+    try:
+        rank_result = await check_and_notify_rank_changes(api_key=api_key)
+        results["rank_check"] = {"success": True, "notified": rank_result.get("notified_count", 0)}
+    except Exception as e:
+        results["rank_check"] = {"success": False, "error": str(e)}
+
+    # Run milestone check (both ahead and behind)
+    try:
+        milestone_result = await check_and_notify_milestones(api_key=api_key)
+        results["milestone_check"] = {
+            "success": True,
+            "notified_ahead": milestone_result.get("notified_ahead", 0),
+            "notified_behind": milestone_result.get("notified_behind", 0)
+        }
+    except Exception as e:
+        results["milestone_check"] = {"success": False, "error": str(e)}
+
+    return {
+        "success": True,
+        "results": results,
+        "timestamp": datetime.now().isoformat()
+    }
 
 
 if __name__ == "__main__":
