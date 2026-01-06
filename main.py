@@ -827,58 +827,25 @@ async def get_my_dashboard(
                 GROUP BY staff_id
             """, staff_id, start_date, end_date, today)
 
-            # Step 2: Get today's data from base tables (real-time)
-            # Use timestamp range for index efficiency (not ::date cast)
+            # Step 2: Get today's data from cache (10-40x faster than raw tables)
+            # Cache is updated every 60 seconds by sync service
             today_summary = None
             if end_date >= today:
                 today_summary = await conn.fetchrow("""
-                    WITH combined_sales AS (
-                        SELECT
-                            d."AcSalesmanID" AS staff_id,
-                            m."AcLocationID" AS outlet_id,
-                            m."DocumentNo" AS doc_no,
-                            d."ItemTotal" AS amount,
-                            COALESCE(d."ItemCost", 0) AS cost,
-                            s."AcStockUDGroup1ID" AS stock_group
-                        FROM "AcCSM" m
-                        INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
-                        LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
-                        WHERE m."DocumentDate" >= $2 AND m."DocumentDate" < $3
-                          AND d."AcSalesmanID" = $1
-
-                        UNION ALL
-
-                        SELECT
-                            d."AcSalesmanID", m."AcLocationID", m."AcCusInvoiceMID",
-                            d."ItemTotalPrice", 0, s."AcStockUDGroup1ID"
-                        FROM "AcCusInvoiceM" m
-                        INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
-                        LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
-                        WHERE m."DocumentDate" >= $2 AND m."DocumentDate" < $3
-                          AND d."AcSalesmanID" = $1
-                    ),
-                    pwp AS (
-                        SELECT SUM(d."ItemTotal") AS pwp_sales
-                        FROM "AcCSM" m
-                        INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
-                        INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
-                        WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
-                          AND m."DocumentDate" >= $2 AND m."DocumentDate" < $3
-                          AND d."AcSalesmanID" = $1
-                    )
                     SELECT
-                        MAX(outlet_id) as outlet_id,
-                        COUNT(DISTINCT doc_no) AS transactions,
-                        SUM(amount) AS total_sales,
-                        SUM(amount - cost) AS gross_profit,
-                        SUM(CASE WHEN stock_group = 'FLTHB' THEN amount ELSE 0 END) AS house_brand_sales,
-                        SUM(CASE WHEN stock_group = 'FLTF1' THEN amount ELSE 0 END) AS focused_1_sales,
-                        SUM(CASE WHEN stock_group = 'FLTF2' THEN amount ELSE 0 END) AS focused_2_sales,
-                        SUM(CASE WHEN stock_group = 'FLTF3' THEN amount ELSE 0 END) AS focused_3_sales,
-                        SUM(CASE WHEN stock_group = 'STOCK CLEARANCE' THEN amount ELSE 0 END) AS clearance_sales,
-                        (SELECT COALESCE(pwp_sales, 0) FROM pwp) AS pwp_sales
-                    FROM combined_sales
-                """, staff_id, today_start, today_end)
+                        outlet_id,
+                        transactions,
+                        total_sales,
+                        gross_profit,
+                        house_brand_sales,
+                        focused_1_sales AS focused_1_sales,
+                        focused_2_sales AS focused_2_sales,
+                        focused_3_sales AS focused_3_sales,
+                        clearance_sales,
+                        pwp_sales
+                    FROM kpi.today_sales_cache
+                    WHERE staff_id = $1 AND sale_date = CURRENT_DATE
+                """, staff_id)
 
             # Combine MV + today's data
             def safe_float(val):
@@ -1040,69 +1007,23 @@ async def get_leaderboard(
             GROUP BY k.staff_id, s."AcSalesmanName", s."AcSalesmanGroupID"
         """, month_start, month_end, today)
 
-        # Step 2: Get today's data from raw tables (real-time)
+        # Step 2: Get today's data from cache (10-40x faster than raw tables)
         today_data = {}
         if month_end >= today:
             today_rows = await conn.fetch("""
-                WITH cash_sales AS (
-                    SELECT
-                        d."AcSalesmanID" as staff_id,
-                        COUNT(DISTINCT m."DocumentNo") as transactions,
-                        COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
-                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotal" ELSE 0 END), 0) as house_brand_sales,
-                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
-                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
-                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
-                    FROM "AcCSM" m
-                    INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
-                    LEFT JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID" AND d."AcStockUOMID" = sc."AcStockUOMID"
-                    WHERE m."DocumentDate" >= $1 AND m."DocumentDate" < $2
-                      AND d."AcSalesmanID" IS NOT NULL AND d."AcSalesmanID" != ''
-                    GROUP BY d."AcSalesmanID"
-                ),
-                invoice_sales AS (
-                    SELECT
-                        d."AcSalesmanID" as staff_id,
-                        COUNT(DISTINCT m."AcCusInvoiceMID") as transactions,
-                        COALESCE(SUM(d."ItemTotalPrice"), 0) as total_sales,
-                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTHB' THEN d."ItemTotalPrice" ELSE 0 END), 0) as house_brand_sales,
-                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
-                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
-                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales
-                    FROM "AcCusInvoiceM" m
-                    INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
-                    LEFT JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID" AND d."AcStockUOMID" = sc."AcStockUOMID"
-                    WHERE m."DocumentDate" >= $1 AND m."DocumentDate" < $2
-                      AND d."AcSalesmanID" IS NOT NULL AND d."AcSalesmanID" != ''
-                    GROUP BY d."AcSalesmanID"
-                ),
-                pwp_sales AS (
-                    SELECT
-                        d."AcSalesmanID" as staff_id,
-                        COALESCE(SUM(d."ItemTotal"), 0) as pwp_sales
-                    FROM "AcCSD" d
-                    INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
-                    INNER JOIN "AcCSDPromotionType" pt ON d."DocumentNo" = pt."DocumentNo" AND d."ItemNo" = pt."ItemNo"
-                    WHERE pt."AcPromotionSettingID" = 'PURCHASE WITH PURCHASE'
-                      AND m."DocumentDate" >= $1 AND m."DocumentDate" < $2
-                    GROUP BY d."AcSalesmanID"
-                )
                 SELECT
-                    COALESCE(c.staff_id, i.staff_id) as staff_id,
-                    COALESCE(c.transactions, 0) + COALESCE(i.transactions, 0) as transactions,
-                    COALESCE(c.total_sales, 0) + COALESCE(i.total_sales, 0) as total_sales,
-                    COALESCE(c.house_brand_sales, 0) + COALESCE(i.house_brand_sales, 0) as house_brand_sales,
-                    COALESCE(c.focused_1_sales, 0) + COALESCE(i.focused_1_sales, 0) as focused_1_sales,
-                    COALESCE(c.focused_2_sales, 0) + COALESCE(i.focused_2_sales, 0) as focused_2_sales,
-                    COALESCE(c.focused_3_sales, 0) + COALESCE(i.focused_3_sales, 0) as focused_3_sales,
-                    COALESCE(c.clearance_sales, 0) + COALESCE(i.clearance_sales, 0) as clearance_sales,
-                    COALESCE(p.pwp_sales, 0) as pwp_sales
-                FROM cash_sales c
-                FULL OUTER JOIN invoice_sales i ON c.staff_id = i.staff_id
-                LEFT JOIN pwp_sales p ON COALESCE(c.staff_id, i.staff_id) = p.staff_id
-            """, today_start, today_end)
+                    staff_id,
+                    transactions,
+                    total_sales,
+                    house_brand_sales,
+                    focused_1_sales,
+                    focused_2_sales,
+                    focused_3_sales,
+                    clearance_sales,
+                    pwp_sales
+                FROM kpi.today_sales_cache
+                WHERE sale_date = CURRENT_DATE
+            """)
 
             for row in today_rows:
                 today_data[row['staff_id']] = dict(row)
