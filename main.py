@@ -492,25 +492,29 @@ def check_password_dynamod(plain_password: str, stored_password: str, user_code:
 async def login(request: LoginRequest):
     """Authenticate user with KPI Tracker credentials.
 
-    Uses AcPersonal for user info/role but kpi_user_auth for password.
+    Uses kpi.staff_list_master for all user info (role, permissions, outlets).
+    Uses kpi_user_auth for password verification.
     First-time users (no KPI password set) will be prompted to set one.
+
+    OPTIMIZED: Single query to staff_list_master instead of 5+ queries to raw tables.
     """
     try:
         async with pool.acquire() as conn:
-            # Query AcPersonal table for user info (Code, Name, Role)
-            user = await conn.fetchrow("""
+            # Query unified staff table for all user info
+            staff = await conn.fetchrow("""
                 SELECT
-                    "Code" as code,
-                    "Name" as name,
-                    "Active" as active,
-                    "IsSupervisor" as is_supervisor,
-                    "AcPOSUserGroupID" as user_group
-                FROM "AcPersonal"
-                WHERE UPPER("Code") = UPPER($1)
-                  AND "Active" = 'Y'
+                    staff_id, staff_name, role, pos_user_group, is_supervisor,
+                    can_view_own_kpi, can_view_leaderboard, can_submit_audit,
+                    can_upload_targets, can_view_all_staff, can_manage_roles,
+                    primary_outlet, primary_outlet_name,
+                    allowed_outlets, allowed_outlet_names,
+                    is_active
+                FROM kpi.staff_list_master
+                WHERE UPPER(staff_id) = UPPER($1)
+                  AND is_active = true
             """, request.code)
 
-            if not user:
+            if not staff:
                 return {"success": False, "error": "Invalid credentials or inactive account"}
 
             # Check if user has set a KPI Tracker password
@@ -523,7 +527,7 @@ async def login(request: LoginRequest):
                 return {
                     "success": False,
                     "needs_password_setup": True,
-                    "user": {"code": user['code'], "name": user['name']},
+                    "user": {"code": staff['staff_id'], "name": staff['staff_name']},
                     "error": "First-time login. Please set your KPI Tracker password."
                 }
 
@@ -531,98 +535,46 @@ async def login(request: LoginRequest):
             if not verify_password(request.password, kpi_auth['password_hash']):
                 return {"success": False, "error": "Invalid credentials"}
 
-            # Determine role and permissions
-            is_supervisor = user['is_supervisor'] == 'Y'
-            role = get_role_from_group(user['user_group'], is_supervisor)
-            permissions = ROLE_PERMISSIONS.get(role, ROLE_PERMISSIONS['staff'])
+            # Build allowed_outlets list from pre-computed arrays
+            allowed_outlets_ids = staff['allowed_outlets'] or []
+            allowed_outlets_names = staff['allowed_outlet_names'] or []
+            allowed_outlets = [
+                {'id': outlet_id, 'name': allowed_outlets_names[i] if i < len(allowed_outlets_names) else outlet_id}
+                for i, outlet_id in enumerate(allowed_outlets_ids)
+            ]
 
-            # Get outlet access based on role
-            # Admin, OOM, Area Manager: Get from AcPersonalLocationAs (multiple outlets)
-            # PIC Outlet, Cashier: Get from AcSalesman.AcSalesmanGroupID (single outlet)
-            allowed_outlets = []
-            outlet_id = None
-            group_id = None
-
+            # Determine outlet_id based on role
+            role = staff['role']
             if role in ['admin', 'operations_manager', 'area_manager']:
-                # Get allowed outlets from AcPersonalLocationAs
-                outlet_rows = await conn.fetch("""
-                    SELECT pl."AcLocationID", l."AcLocationDesc"
-                    FROM "AcPersonalLocationAs" pl
-                    LEFT JOIN "AcLocation" l ON pl."AcLocationID" = l."AcLocationID"
-                    WHERE pl."Code" = $1 AND pl."IsActiveAtPOS" = 'Y'
-                    ORDER BY pl."AcLocationID"
-                """, user['code'])
-                allowed_outlets = [
-                    {'id': row['AcLocationID'], 'name': row['AcLocationDesc'] or row['AcLocationID']}
-                    for row in outlet_rows
-                ]
-                # Default outlet_id is None (means ALL outlets selected)
-                outlet_id = None
+                outlet_id = None  # Multi-outlet access
                 group_id = None
             else:
-                # PIC Outlet, Cashier: Get from AcSalesman.AcSalesmanGroupID
-                # Note: AcSalesmanGroupID may differ from AcLocationID (e.g., BG group → HQ location)
-                staff_info = await conn.fetchrow("""
-                    SELECT s."AcSalesmanGroupID" as group_id
-                    FROM "AcSalesman" s
-                    WHERE s."AcSalesmanID" = $1 AND s."Active" = 'Y'
-                """, user['code'])
-                if staff_info and staff_info['group_id']:
-                    group_id = staff_info['group_id']
+                outlet_id = staff['primary_outlet']
+                group_id = staff['primary_outlet']
 
-                    # Check if group_id exists as a valid AcLocationID
-                    location_check = await conn.fetchrow("""
-                        SELECT "AcLocationID", "AcLocationDesc"
-                        FROM "AcLocation"
-                        WHERE "AcLocationID" = $1
-                    """, group_id)
-
-                    if location_check:
-                        # Group ID is a valid location ID
-                        outlet_id = group_id
-                        allowed_outlets = [
-                            {'id': outlet_id, 'name': location_check['AcLocationDesc'] or outlet_id}
-                        ]
-                    else:
-                        # Group ID doesn't match location - find actual outlet from sales data
-                        # Order by sale_date DESC to get the most recent outlet
-                        actual_outlet = await conn.fetchrow("""
-                            SELECT outlet_id
-                            FROM analytics.mv_staff_daily_kpi
-                            WHERE staff_id = $1
-                            ORDER BY sale_date DESC
-                            LIMIT 1
-                        """, user['code'])
-
-                        if actual_outlet and actual_outlet['outlet_id']:
-                            outlet_id = actual_outlet['outlet_id']
-                            # Get outlet name
-                            outlet_info = await conn.fetchrow("""
-                                SELECT "AcLocationDesc" FROM "AcLocation" WHERE "AcLocationID" = $1
-                            """, outlet_id)
-                            allowed_outlets = [
-                                {'id': outlet_id, 'name': outlet_info['AcLocationDesc'] if outlet_info else outlet_id}
-                            ]
-                        else:
-                            # No sales data - use group_id as fallback (staff may be new)
-                            outlet_id = group_id
-                            allowed_outlets = [
-                                {'id': group_id, 'name': group_id}
-                            ]
+            # Build permissions from pre-computed columns
+            permissions = {
+                'can_view_own_kpi': staff['can_view_own_kpi'],
+                'can_view_leaderboard': staff['can_view_leaderboard'],
+                'can_submit_audit': staff['can_submit_audit'],
+                'can_upload_targets': staff['can_upload_targets'],
+                'can_view_all_staff': staff['can_view_all_staff'],
+                'can_manage_roles': staff['can_manage_roles']
+            }
 
             # Generate session token
             token = secrets.token_urlsafe(32)
 
             # Store session (expires in 24 hours)
             user_data = {
-                'code': user['code'],
-                'name': user['name'],
+                'code': staff['staff_id'],
+                'name': staff['staff_name'],
                 'role': role,
                 'outlet_id': outlet_id,
                 'group_id': group_id,
                 'allowed_outlets': allowed_outlets,
-                'is_supervisor': is_supervisor,
-                'user_group': user['user_group'],
+                'is_supervisor': staff['is_supervisor'],
+                'user_group': staff['pos_user_group'],
                 'permissions': permissions
             }
 
@@ -668,7 +620,9 @@ async def refresh_session(token: str = Query(..., description="Session token")):
     """Refresh session data from database.
 
     Use this to update user's role/permissions without requiring logout/login.
-    Useful when user's AcPOSUserGroupID has been changed in the database.
+    Useful when user's role has been changed in the database.
+
+    OPTIMIZED: Single query to kpi.staff_list_master instead of multiple queries.
     """
     if token not in sessions:
         return {"success": False, "error": "Invalid session"}
@@ -683,76 +637,61 @@ async def refresh_session(token: str = Query(..., description="Session token")):
 
     try:
         async with pool.acquire() as conn:
-            # Re-fetch user data from database
-            user = await conn.fetchrow("""
+            # Query unified staff table for all user info
+            staff = await conn.fetchrow("""
                 SELECT
-                    "Code" as code,
-                    "Name" as name,
-                    "Active" as active,
-                    "IsSupervisor" as is_supervisor,
-                    "AcPOSUserGroupID" as user_group
-                FROM "AcPersonal"
-                WHERE UPPER("Code") = UPPER($1)
-                  AND "Active" = 'Y'
+                    staff_id, staff_name, role, pos_user_group, is_supervisor,
+                    can_view_own_kpi, can_view_leaderboard, can_submit_audit,
+                    can_upload_targets, can_view_all_staff, can_manage_roles,
+                    primary_outlet, primary_outlet_name,
+                    allowed_outlets, allowed_outlet_names,
+                    is_active
+                FROM kpi.staff_list_master
+                WHERE UPPER(staff_id) = UPPER($1)
+                  AND is_active = true
             """, user_code)
 
-            if not user:
+            if not staff:
                 del sessions[token]
                 return {"success": False, "error": "User no longer active"}
 
-            # Recalculate role and permissions
-            is_supervisor = user['is_supervisor'] == 'Y'
-            role = get_role_from_group(user['user_group'], is_supervisor)
-            permissions = ROLE_PERMISSIONS.get(role, ROLE_PERMISSIONS['staff'])
+            # Build allowed_outlets list from pre-computed arrays
+            allowed_outlets_ids = staff['allowed_outlets'] or []
+            allowed_outlets_names = staff['allowed_outlet_names'] or []
+            allowed_outlets = [
+                {'id': outlet_id, 'name': allowed_outlets_names[i] if i < len(allowed_outlets_names) else outlet_id}
+                for i, outlet_id in enumerate(allowed_outlets_ids)
+            ]
 
-            # Get updated outlet access
-            allowed_outlets = []
-            outlet_id = None
-            group_id = None
-
+            # Determine outlet_id based on role
+            role = staff['role']
             if role in ['admin', 'operations_manager', 'area_manager']:
-                outlet_rows = await conn.fetch("""
-                    SELECT pl."AcLocationID", l."AcLocationDesc"
-                    FROM "AcPersonalLocationAs" pl
-                    LEFT JOIN "AcLocation" l ON pl."AcLocationID" = l."AcLocationID"
-                    WHERE pl."Code" = $1 AND pl."IsActiveAtPOS" = 'Y'
-                    ORDER BY pl."AcLocationID"
-                """, user['code'])
-                allowed_outlets = [
-                    {'id': row['AcLocationID'], 'name': row['AcLocationDesc'] or row['AcLocationID']}
-                    for row in outlet_rows
-                ]
                 outlet_id = None
                 group_id = None
             else:
-                staff_info = await conn.fetchrow("""
-                    SELECT s."AcSalesmanGroupID" as group_id
-                    FROM "AcSalesman" s
-                    WHERE s."AcSalesmanID" = $1 AND s."Active" = 'Y'
-                """, user['code'])
-                if staff_info and staff_info['group_id']:
-                    group_id = staff_info['group_id']
-                    outlet_id = group_id
-                    location_check = await conn.fetchrow("""
-                        SELECT "AcLocationID", "AcLocationDesc"
-                        FROM "AcLocation"
-                        WHERE "AcLocationID" = $1
-                    """, group_id)
-                    if location_check:
-                        allowed_outlets = [
-                            {'id': outlet_id, 'name': location_check['AcLocationDesc'] or outlet_id}
-                        ]
+                outlet_id = staff['primary_outlet']
+                group_id = staff['primary_outlet']
+
+            # Build permissions from pre-computed columns
+            permissions = {
+                'can_view_own_kpi': staff['can_view_own_kpi'],
+                'can_view_leaderboard': staff['can_view_leaderboard'],
+                'can_submit_audit': staff['can_submit_audit'],
+                'can_upload_targets': staff['can_upload_targets'],
+                'can_view_all_staff': staff['can_view_all_staff'],
+                'can_manage_roles': staff['can_manage_roles']
+            }
 
             # Update session with fresh data
             updated_user = {
-                'code': user['code'],
-                'name': user['name'],
+                'code': staff['staff_id'],
+                'name': staff['staff_name'],
                 'role': role,
                 'outlet_id': outlet_id,
                 'group_id': group_id,
                 'allowed_outlets': allowed_outlets,
-                'is_supervisor': is_supervisor,
-                'user_group': user['user_group'],
+                'is_supervisor': staff['is_supervisor'],
+                'user_group': staff['pos_user_group'],
                 'permissions': permissions
             }
 
@@ -761,7 +700,7 @@ async def refresh_session(token: str = Query(..., description="Session token")):
             # Log the change if role changed
             old_role = old_user.get('role', 'unknown')
             if old_role != role:
-                print(f"[SESSION REFRESH] {user['name']} ({user_code}): role changed from '{old_role}' to '{role}'", flush=True)
+                print(f"[SESSION REFRESH] {staff['staff_name']} ({user_code}): role changed from '{old_role}' to '{role}'", flush=True)
 
             return {
                 "success": True,
