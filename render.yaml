@@ -83,12 +83,14 @@ services:
   # SYSTEM CRON JOBS
   # ============================================================================
 
-  # MV Refresh every 30 min during business hours (8am-11pm MYT)
-  # Also runs weekly verification on Friday 12am MYT (first refresh of Friday)
+  # Weekly Summary Verification - Friday 8am MYT (start of weekend)
+  # - Verifies daily_sales_summary accuracy vs raw tables
+  # - Fixes any discrepancies found
+  # - No MV refresh needed (MVs converted to views - always fresh)
   - type: cron
-    name: flt-mv-refresh
+    name: flt-weekly-verify
     runtime: python
     region: singapore
-    schedule: "*/30 0-15 * * *"
+    schedule: "0 0 * * 5"
     buildCommand: pip install requests
-    startCommand: python cron_refresh.py
+    startCommand: python cron_weekly_verify.py

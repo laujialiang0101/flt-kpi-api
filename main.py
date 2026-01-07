@@ -3516,41 +3516,25 @@ async def _do_background_refresh():
 @app.post("/api/v1/admin/refresh-views")
 async def refresh_materialized_views(
     api_key: str = Query(..., description="API key for authentication"),
-    wait: bool = Query(False, description="Wait for completion (default: fire-and-forget)")
+    wait: bool = Query(False, description="Deprecated - no longer used")
 ):
-    """Refresh all materialized views. Returns immediately by default (fire-and-forget).
+    """DEPRECATED: MV refresh no longer needed.
 
-    Use wait=true to wait for completion (may timeout for external calls).
-    Check /api/v1/admin/refresh-status for background refresh status.
+    MVs have been converted to regular views that always show fresh data
+    from daily_sales_summary (updated every 60s by sync service).
+
+    This endpoint is kept for backward compatibility but does nothing.
     """
-    global _refresh_in_progress
-
     expected_key = os.getenv('REFRESH_API_KEY', 'flt-refresh-2024')
     if api_key != expected_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    if _refresh_in_progress:
-        return {
-            "success": True,
-            "message": "Refresh already in progress",
-            "status": "running"
-        }
-
-    _refresh_in_progress = True
-
-    if wait:
-        # Wait for completion (original behavior)
-        await _do_background_refresh()
-        return _last_refresh_result
-    else:
-        # Fire-and-forget: start background task and return immediately
-        asyncio.create_task(_do_background_refresh())
-        return {
-            "success": True,
-            "message": "Refresh started in background",
-            "status": "started",
-            "check_status_at": "/api/v1/admin/refresh-status"
-        }
+    return {
+        "success": True,
+        "message": "MV refresh no longer needed - views always show fresh data",
+        "status": "deprecated",
+        "info": "MVs converted to regular views pointing to daily_sales_summary (60s fresh)"
+    }
 
 
 @app.get("/api/v1/admin/refresh-status")
