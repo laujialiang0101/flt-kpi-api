@@ -4987,12 +4987,12 @@ async def check_and_notify_streaks(
     year_month = int(today.strftime('%Y%m'))
     notified = []
 
-    # Only run on Saturdays (end of work week) or Sundays
-    # This gives weekly summary rather than daily spam
-    if today.weekday() not in [5, 6]:  # Saturday = 5, Sunday = 6
+    # Only run on Fridays or Saturdays (East Coast Malaysia weekend)
+    # Terengganu & Kelantan: Fri-Sat weekend, Sun-Thu working days
+    if today.weekday() not in [4, 5]:  # Friday = 4, Saturday = 5
         return {
             "success": True,
-            "message": "Streak check only runs on weekends (end of work week)",
+            "message": "Streak check only runs on weekends (Fri-Sat for East Coast MY)",
             "notified_count": 0
         }
 
@@ -5008,9 +5008,11 @@ async def check_and_notify_streaks(
                 )
             """)
 
-            # Get week boundaries (Mon-Sat)
-            week_start = today - timedelta(days=today.weekday())  # Monday
-            week_end = today
+            # Get week boundaries (Sun-Thu for East Coast Malaysia)
+            # Sunday = 6, so if today is Fri(4) or Sat(5), week started last Sunday
+            days_since_sunday = (today.weekday() + 1) % 7  # Sunday = 0 in this calc
+            week_start = today - timedelta(days=days_since_sunday)  # Last Sunday
+            week_end = week_start + timedelta(days=4)  # Thursday (end of work week)
 
             # Get subscribed staff with targets
             subscribed = await conn.fetch("""
