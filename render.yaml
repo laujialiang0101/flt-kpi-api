@@ -91,3 +91,15 @@ services:
     schedule: "*/30 0-15 * * *"
     buildCommand: pip install requests
     startCommand: python cron_refresh.py
+
+  # Weekly Summary Verification (Friday 12am MYT = Thursday 16:00 UTC)
+  # - Compares daily_sales_summary with raw AcCSD data
+  # - Fixes any discrepancies found
+  # - Logs verification results
+  - type: cron
+    name: flt-weekly-verification
+    runtime: python
+    region: singapore
+    schedule: "0 16 * * 4"
+    buildCommand: pip install requests
+    startCommand: python cron_weekly_verify.py

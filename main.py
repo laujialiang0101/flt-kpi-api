@@ -896,16 +896,33 @@ async def get_my_dashboard(
                   AND month = DATE_TRUNC('month', $2::date)
             """, staff_id, start_date)
 
-            # Get daily breakdown from MV (fast)
+            # Get daily breakdown from MV (historical) + today_sales_cache
+            # MV has data up to yesterday, cache has today
             daily = await conn.fetch("""
-                SELECT
-                    sale_date,
-                    transactions,
-                    total_sales,
-                    house_brand_sales
-                FROM analytics.mv_staff_daily_kpi
-                WHERE staff_id = $1
-                  AND sale_date BETWEEN $2 AND $3
+                SELECT sale_date, transactions, total_sales, house_brand_sales
+                FROM (
+                    -- Historical from MV (excludes today)
+                    SELECT
+                        sale_date,
+                        transactions,
+                        total_sales,
+                        house_brand_sales
+                    FROM analytics.mv_staff_daily_kpi
+                    WHERE staff_id = $1
+                      AND sale_date BETWEEN $2 AND $3
+                      AND sale_date < CURRENT_DATE
+                    UNION ALL
+                    -- Today from cache
+                    SELECT
+                        sale_date,
+                        transactions,
+                        total_sales,
+                        house_brand_sales
+                    FROM kpi.today_sales_cache
+                    WHERE staff_id = $1
+                      AND sale_date = CURRENT_DATE
+                      AND CURRENT_DATE BETWEEN $2 AND $3
+                ) combined
                 ORDER BY sale_date
             """, staff_id, start_date, end_date)
 
@@ -3587,6 +3604,60 @@ async def get_view_status():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.post("/api/v1/admin/verify-summary")
+async def verify_summary(days: int = 7, api_key: str = None):
+    """Weekly verification of daily_sales_summary accuracy.
+
+    Compares summary totals with raw AcCSD data and fixes discrepancies.
+    Called by weekly cron job on Friday 12am MYT.
+    """
+    if api_key != PUSH_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    try:
+        async with pool.acquire() as conn:
+            # Call verification function
+            result = await conn.fetchval(
+                "SELECT kpi.verify_summary_accuracy($1)",
+                days
+            )
+
+            # Get verification log for this run
+            logs = await conn.fetch("""
+                SELECT *
+                FROM kpi.summary_verification_log
+                WHERE verified_at >= NOW() - INTERVAL '1 minute'
+                ORDER BY verified_at DESC
+            """)
+
+            discrepancies = []
+            for log in logs:
+                if log['discrepancy_found']:
+                    discrepancies.append({
+                        "date": log['verification_date'].isoformat(),
+                        "staff_code": log['staff_code'],
+                        "summary_total": float(log['summary_total_sales']) if log['summary_total_sales'] else 0,
+                        "raw_total": float(log['raw_total_sales']) if log['raw_total_sales'] else 0,
+                        "difference": float(log['difference']) if log['difference'] else 0,
+                        "action": log['action_taken']
+                    })
+
+            return {
+                "success": True,
+                "message": result,
+                "days_checked": days,
+                "discrepancies_found": len(discrepancies),
+                "discrepancies": discrepancies[:20],  # Limit to 20 for response size
+                "verified_at": datetime.now().isoformat()
+            }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 
 @app.get("/api/v1/regions")
