@@ -185,6 +185,11 @@ pool: asyncpg.Pool = None
 connected_host: str = None  # Track which host we're connected to (description for display)
 
 
+async def init_connection(conn):
+    """Initialize each connection with MYT timezone for correct CURRENT_DATE."""
+    await conn.execute("SET timezone TO 'Asia/Kuala_Lumpur'")
+
+
 async def create_pool_with_retry():
     """Create connection pool - try internal first (faster), then external."""
     global connected_host
@@ -205,6 +210,7 @@ async def create_pool_with_retry():
                 min_size=1,
                 max_size=10,
                 command_timeout=60,
+                init=init_connection,  # Set MYT timezone
             )
             async with created_pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
@@ -231,6 +237,7 @@ async def create_pool_with_retry():
                 min_size=1,
                 max_size=10,
                 command_timeout=60,
+                init=init_connection,  # Set MYT timezone
             )
             async with created_pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
@@ -257,6 +264,7 @@ async def create_pool_with_retry():
                 min_size=1,
                 max_size=10,
                 command_timeout=60,
+                init=init_connection,  # Set MYT timezone
             )
             async with created_pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
