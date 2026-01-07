@@ -79,18 +79,3 @@ services:
     buildCommand: pip install requests
     startCommand: python cron_milestones.py
 
-  # ============================================================================
-  # SYSTEM CRON JOBS
-  # ============================================================================
-
-  # Weekly Summary Verification - Friday 8am MYT (start of weekend)
-  # - Verifies daily_sales_summary accuracy vs raw tables
-  # - Fixes any discrepancies found
-  # - No MV refresh needed (MVs converted to views - always fresh)
-  - type: cron
-    name: flt-weekly-verify
-    runtime: python
-    region: singapore
-    schedule: "0 0 * * 5"
-    buildCommand: pip install requests
-    startCommand: python cron_weekly_verify.py
