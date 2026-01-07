@@ -182,7 +182,7 @@ DB_PASSWORD = os.getenv('DB_PASSWORD', 'Wy0ZP1wjLPsIta0YLpYLeRWgdITbya2m')
 
 # Global connection pool
 pool: asyncpg.Pool = None
-connected_host: str = None  # Track which host we're connected to
+connected_host: str = None  # Track which host we're connected to (description for display)
 
 
 async def create_pool_with_retry():
@@ -3434,13 +3434,16 @@ async def _do_background_refresh():
         # Pool connections have 60s command_timeout which causes TimeoutError
         # MV refresh time scales with data size - should never timeout at Python level
         # PostgreSQL statement_timeout provides the safety net (3 hours)
+        # Derive actual hostname from connected_host (which contains description like "host (internal, no SSL)")
+        use_internal = connected_host and 'internal' in connected_host
+        mv_host = INTERNAL_HOST if use_internal else EXTERNAL_HOST
         mv_conn = await asyncpg.connect(
-            host=connected_host or EXTERNAL_HOST,
+            host=mv_host,
             port=DB_PORT,
             database=DB_NAME,
             user=DB_USER,
             password=DB_PASSWORD,
-            ssl='require' if (connected_host or EXTERNAL_HOST) == EXTERNAL_HOST else None,
+            ssl=None if use_internal else 'require',
             command_timeout=None,  # No Python timeout - let PostgreSQL handle it
         )
 
