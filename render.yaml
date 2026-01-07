@@ -12,7 +12,78 @@ services:
       - key: DB_PASSWORD
         sync: false  # Set manually in Render dashboard
 
-  # Cron Job: MV Refresh every 30 min during business hours (8am-11pm MYT)
+  # ============================================================================
+  # NOTIFICATION CRON JOBS
+  # ============================================================================
+  # Schedule Reference (MYT = UTC+8):
+  #   8am MYT  = 0:00 UTC    12pm MYT = 4:00 UTC    6pm MYT  = 10:00 UTC
+  #   9pm MYT  = 13:00 UTC   10pm MYT = 14:00 UTC   11pm MYT = 15:00 UTC
+
+  # Morning Briefing at 8am MYT (Mon-Sat)
+  # - Yesterday's performance summary
+  # - Today's target reminder
+  # - Motivational kickoff message
+  - type: cron
+    name: flt-morning-briefing
+    runtime: python
+    region: singapore
+    schedule: "0 0 * * 1-6"
+    buildCommand: pip install requests
+    startCommand: python cron_morning.py
+
+  # Midday Check at 12pm MYT (Mon-Sat)
+  # - Progress vs daily target
+  # - Encourage afternoon push
+  - type: cron
+    name: flt-midday-check
+    runtime: python
+    region: singapore
+    schedule: "0 4 * * 1-6"
+    buildCommand: pip install requests
+    startCommand: python cron_midday.py
+
+  # End of Day Recap at 6pm MYT (Mon-Sat)
+  # - Today's total commission earned
+  # - Rank movement
+  # - Tomorrow teaser
+  - type: cron
+    name: flt-eod-recap
+    runtime: python
+    region: singapore
+    schedule: "0 10 * * 1-6"
+    buildCommand: pip install requests
+    startCommand: python cron_eod.py
+
+  # Commission Threshold Check every 30 min during business hours (Mon-Sat, 9am-9pm MYT)
+  # - Tracks cumulative daily commission
+  # - Notifies at thresholds: RM50, RM100, RM200, RM500
+  # - Each threshold notifies ONCE per day
+  - type: cron
+    name: flt-commission-check
+    runtime: python
+    region: singapore
+    schedule: "*/30 1-13 * * 1-6"
+    buildCommand: pip install requests
+    startCommand: python cron_commission.py
+
+  # Daily Milestones at 9pm MYT (daily)
+  # - Rank change celebrations
+  # - Streak milestones (3, 7, 14, 30 days)
+  # - Target milestone achievements (25%, 50%, 75%, 100%)
+  # - First-time achievements
+  - type: cron
+    name: flt-daily-milestones
+    runtime: python
+    region: singapore
+    schedule: "0 13 * * *"
+    buildCommand: pip install requests
+    startCommand: python cron_milestones.py
+
+  # ============================================================================
+  # SYSTEM CRON JOBS
+  # ============================================================================
+
+  # MV Refresh every 30 min during business hours (8am-11pm MYT)
   - type: cron
     name: flt-mv-refresh
     runtime: python
@@ -20,21 +91,3 @@ services:
     schedule: "*/30 0-15 * * *"
     buildCommand: pip install requests
     startCommand: python cron_refresh.py
-
-  # Cron Job: Morning Briefing at 8am MYT (0:00 UTC)
-  - type: cron
-    name: flt-morning-briefing
-    runtime: python
-    region: singapore
-    schedule: "0 0 * * *"
-    buildCommand: pip install requests
-    startCommand: python cron_morning.py
-
-  # Cron Job: Evening Recap at 10:30pm MYT (14:30 UTC)
-  - type: cron
-    name: flt-evening-recap
-    runtime: python
-    region: singapore
-    schedule: "30 14 * * *"
-    buildCommand: pip install requests
-    startCommand: python cron_evening.py

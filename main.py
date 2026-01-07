@@ -4962,13 +4962,19 @@ async def check_and_notify_milestones(
 async def check_and_notify_streaks(
     api_key: str = Query(..., description="API key for authentication")
 ):
-    """Check for consecutive day streaks and notify.
+    """Check for weekly consistency and consecutive week streaks.
 
-    Schedule daily at 11pm: 0 23 * * *
+    Schedule: Daily at 9pm MYT (part of daily milestones)
 
-    Streaks tracked:
-    - Consecutive days with sales
-    - Consecutive days meeting daily target
+    Tracks:
+    1. Weekly consistency: Days on target this week (accounts for 1-2 days off)
+    2. Weekly streak: Consecutive weeks meeting weekly target (MTD pace)
+
+    Staff typically work 5-6 days/week, so we celebrate:
+    - 4/5 days on target: "Great week! 4 days on target!"
+    - 5/5 days on target: "Perfect week! All working days crushed!"
+    - 2-week streak: Consecutive weeks on pace
+    - 4-week streak: Monthly champion
     """
     expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
     if api_key != expected_key:
@@ -4978,57 +4984,126 @@ async def check_and_notify_streaks(
         return {"success": False, "error": "Push notifications not available"}
 
     today = date.today()
+    year_month = int(today.strftime('%Y%m'))
     notified = []
+
+    # Only run on Saturdays (end of work week) or Sundays
+    # This gives weekly summary rather than daily spam
+    if today.weekday() not in [5, 6]:  # Saturday = 5, Sunday = 6
+        return {
+            "success": True,
+            "message": "Streak check only runs on weekends (end of work week)",
+            "notified_count": 0
+        }
 
     try:
         async with pool.acquire() as conn:
-            # Get subscribed staff
-            subscribed = await conn.fetch("""
-                SELECT DISTINCT staff_id FROM kpi.push_subscriptions
+            # Create streak tracking table
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS kpi.weekly_streak_notifications (
+                    staff_id TEXT,
+                    week_start DATE,
+                    notified_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (staff_id, week_start)
+                )
             """)
 
-            for sub in subscribed:
-                staff_id = sub['staff_id']
+            # Get week boundaries (Mon-Sat)
+            week_start = today - timedelta(days=today.weekday())  # Monday
+            week_end = today
 
-                # Calculate streak: consecutive days with sales
-                streak_data = await conn.fetch("""
-                    WITH daily_sales AS (
-                        SELECT sale_date, SUM(total_sales) as daily_total
-                        FROM analytics.mv_staff_daily_kpi
-                        WHERE staff_id = $1 AND sale_date <= $2
-                        GROUP BY sale_date
-                        ORDER BY sale_date DESC
-                    ),
-                    streak AS (
-                        SELECT sale_date, daily_total,
-                               ROW_NUMBER() OVER (ORDER BY sale_date DESC) as rn,
-                               $2::date - sale_date::date as days_ago
-                        FROM daily_sales
-                        WHERE daily_total > 0
-                    )
-                    SELECT COUNT(*) as streak_days
-                    FROM streak
-                    WHERE days_ago = rn - 1
-                """, staff_id, today)
+            # Get subscribed staff with targets
+            subscribed = await conn.fetch("""
+                SELECT DISTINCT ps.staff_id, m.staff_name,
+                       COALESCE(t.total_sales_target, 0) as monthly_target
+                FROM kpi.push_subscriptions ps
+                JOIN kpi.staff_list_master m ON ps.staff_id = m.staff_id
+                LEFT JOIN "KPITargets" t ON ps.staff_id = t.salesman_id AND t.year_month = $1
+            """, year_month)
 
-                streak_days = int(streak_data[0]['streak_days']) if streak_data else 0
+            # Get already notified this week
+            notified_this_week = await conn.fetch("""
+                SELECT staff_id FROM kpi.weekly_streak_notifications
+                WHERE week_start = $1
+            """, week_start)
+            already_notified = {r['staff_id'] for r in notified_this_week}
 
-                # Check if this is a milestone streak
-                milestone_streaks = [3, 5, 7, 14, 30]
+            for staff in subscribed:
+                staff_id = staff['staff_id']
+                staff_name = staff['staff_name']
+                monthly_target = float(staff['monthly_target'] or 0)
 
-                if streak_days in milestone_streaks:
-                    message = STREAK_MESSAGES.get(streak_days, f"{streak_days}-day streak! 🔥")
+                if staff_id in already_notified:
+                    continue
+
+                if monthly_target <= 0:
+                    continue
+
+                # Calculate daily target (assuming ~26 working days)
+                daily_target = monthly_target / 26
+
+                # Get this week's daily performance
+                week_data = await conn.fetch("""
+                    SELECT sale_date, SUM(total_sales) as daily_total
+                    FROM analytics.mv_staff_daily_kpi
+                    WHERE staff_id = $1
+                      AND sale_date >= $2
+                      AND sale_date <= $3
+                    GROUP BY sale_date
+                """, staff_id, week_start, week_end)
+
+                working_days = len(week_data)
+                days_on_target = sum(1 for d in week_data if float(d['daily_total'] or 0) >= daily_target)
+
+                # Only celebrate if they worked at least 3 days this week
+                if working_days >= 3:
+                    if working_days == days_on_target and days_on_target >= 4:
+                        # Perfect week!
+                        title = "🌟 Perfect Week!"
+                        message = f"All {working_days} working days on target! Absolute beast mode!"
+                        notif_type = "perfect_week"
+                    elif days_on_target >= 4:
+                        # Great week
+                        title = "✨ Great Week!"
+                        message = f"{days_on_target}/{working_days} days on target! Solid consistency!"
+                        notif_type = "great_week"
+                    else:
+                        # Not enough days on target - skip notification
+                        continue
 
                     try:
                         await send_push_to_staff(
                             staff_id=staff_id,
-                            title="🔥 Streak Milestone!",
+                            title=title,
                             message=message,
-                            data={"type": "streak", "days": streak_days}
+                            data={"type": notif_type, "days_worked": working_days, "days_on_target": days_on_target}
                         )
-                        notified.append({"staff_id": staff_id, "streak": streak_days})
+
+                        # Save to notifications
+                        await conn.execute("""
+                            INSERT INTO kpi.notifications (staff_id, title, message, type, data)
+                            VALUES ($1, $2, $3, 'weekly_consistency', $4)
+                        """, staff_id, title, message, json.dumps({
+                            "days_worked": working_days,
+                            "days_on_target": days_on_target,
+                            "week_start": str(week_start)
+                        }))
+
+                        # Mark as notified
+                        await conn.execute("""
+                            INSERT INTO kpi.weekly_streak_notifications (staff_id, week_start)
+                            VALUES ($1, $2) ON CONFLICT DO NOTHING
+                        """, staff_id, week_start)
+
+                        notified.append({
+                            "staff_id": staff_id,
+                            "staff_name": staff_name,
+                            "days_worked": working_days,
+                            "days_on_target": days_on_target,
+                            "type": notif_type
+                        })
                     except Exception as e:
-                        print(f"Failed to notify streak for {staff_id}: {e}")
+                        print(f"Failed to notify weekly consistency for {staff_id}: {e}")
 
         return {
             "success": True,
@@ -5383,6 +5458,322 @@ async def run_daily_rank_and_milestone_check(
         "results": results,
         "timestamp": datetime.now().isoformat()
     }
+
+
+# ============================================================================
+# THRESHOLD-BASED COMMISSION ALERTS
+# ============================================================================
+# Instead of notifying every small commission increase, we notify at meaningful
+# thresholds to avoid spam while still providing dopamine hits.
+
+# Average commission ~RM400/month = ~RM15/day
+# Thresholds set to celebrate meaningful achievements
+COMMISSION_THRESHOLDS = [
+    (10, "Nice Start!", "RM10+ commission today - keep it up!"),
+    (20, "Double Digits!", "RM20+ commission - you're rolling!"),
+    (30, "On a Roll!", "RM30+ commission - above average day!"),
+    (50, "Half Century!", "RM50+ commission - crushing it!"),
+    (100, "TRIPLE DIGITS!", "RM100+ commission - absolute legend!"),
+]
+
+
+@app.post("/api/v1/push/commission-threshold-check")
+async def check_commission_thresholds(
+    api_key: str = Query(..., description="API key for authentication")
+):
+    """Check cumulative daily commission against thresholds.
+
+    Notifies when staff crosses RM50, RM100, RM200, RM500, RM1000 thresholds.
+    Each threshold is notified ONCE per day to avoid spam.
+
+    Schedule: Every 30 min during business hours (9am-9pm MYT)
+    """
+    expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
+    if api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    if not PUSH_AVAILABLE:
+        return {"success": False, "error": "Push notifications not available"}
+
+    today = date.today()
+    notified = []
+
+    try:
+        async with pool.acquire() as conn:
+            # Create threshold tracking table if not exists
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS kpi.commission_threshold_notifications (
+                    staff_id TEXT,
+                    threshold INTEGER,
+                    sale_date DATE,
+                    notified_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (staff_id, threshold, sale_date)
+                )
+            """)
+
+            # Clean up old records (keep only last 7 days)
+            await conn.execute("""
+                DELETE FROM kpi.commission_threshold_notifications
+                WHERE sale_date < CURRENT_DATE - INTERVAL '7 days'
+            """)
+
+            # Get today's commission for all staff from cache (faster than MV)
+            staff_commissions = await conn.fetch("""
+                SELECT
+                    c.staff_id,
+                    m.staff_name,
+                    COALESCE(
+                        (SELECT SUM(commission) FROM analytics.mv_staff_daily_commission
+                         WHERE staff_id = c.staff_id AND sale_date = CURRENT_DATE), 0
+                    ) as today_commission
+                FROM kpi.push_subscriptions c
+                JOIN kpi.staff_list_master m ON c.staff_id = m.staff_id
+                GROUP BY c.staff_id, m.staff_name
+            """)
+
+            # Get already-notified thresholds for today
+            notified_thresholds = await conn.fetch("""
+                SELECT staff_id, threshold
+                FROM kpi.commission_threshold_notifications
+                WHERE sale_date = $1
+            """, today)
+            notified_set = {(r['staff_id'], r['threshold']) for r in notified_thresholds}
+
+            # Check each staff against thresholds
+            for staff in staff_commissions:
+                staff_id = staff['staff_id']
+                staff_name = staff['staff_name']
+                commission = float(staff['today_commission'] or 0)
+
+                # Check each threshold
+                for threshold, title_text, message_text in COMMISSION_THRESHOLDS:
+                    # Skip if already notified this threshold today
+                    if (staff_id, threshold) in notified_set:
+                        continue
+
+                    # Check if commission crossed this threshold
+                    if commission >= threshold:
+                        # Send notification
+                        full_title = f"💰 {title_text}"
+                        full_message = f"{message_text}\nTotal today: RM{commission:.2f}"
+
+                        # Save to notifications table
+                        try:
+                            await conn.execute("""
+                                INSERT INTO kpi.notifications (staff_id, title, message, type, data)
+                                VALUES ($1, $2, $3, 'commission_threshold', $4)
+                            """, staff_id, full_title, full_message, json.dumps({
+                                "threshold": threshold,
+                                "commission": commission,
+                                "date": str(today)
+                            }))
+                        except Exception as e:
+                            print(f"Failed to save notification: {e}")
+
+                        # Send push
+                        result = await send_push_to_staff(
+                            staff_id=staff_id,
+                            title=full_title,
+                            message=full_message,
+                            data={"type": "commission_threshold", "threshold": threshold}
+                        )
+
+                        # Mark as notified
+                        await conn.execute("""
+                            INSERT INTO kpi.commission_threshold_notifications
+                            (staff_id, threshold, sale_date)
+                            VALUES ($1, $2, $3)
+                            ON CONFLICT DO NOTHING
+                        """, staff_id, threshold, today)
+
+                        notified.append({
+                            "staff_id": staff_id,
+                            "staff_name": staff_name,
+                            "threshold": threshold,
+                            "commission": commission,
+                            "push_sent": result.get("success", False)
+                        })
+
+            return {
+                "success": True,
+                "checked": len(staff_commissions),
+                "notified": len(notified),
+                "details": notified
+            }
+
+    except Exception as e:
+        print(f"Commission threshold check error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+
+# ============================================================================
+# FIRST-TIME ACHIEVEMENTS
+# ============================================================================
+# Celebrate "firsts" - these only happen once per staff member's career.
+
+@app.post("/api/v1/push/first-time-achievements")
+async def check_first_time_achievements(
+    api_key: str = Query(..., description="API key for authentication")
+):
+    """Check and notify first-time achievements.
+
+    Achievements tracked:
+    - first_sale: First ever transaction
+    - first_100: First RM100+ single transaction
+    - first_hb: First House Brand sale
+    - first_top10: First time entering company Top 10
+    - first_target: First time hitting monthly target
+
+    Each achievement is notified ONCE per staff member (lifetime).
+
+    Schedule: Daily at 9pm MYT (as part of cron_milestones.py)
+    """
+    expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
+    if api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    if not PUSH_AVAILABLE:
+        return {"success": False, "error": "Push notifications not available"}
+
+    notified = []
+
+    try:
+        async with pool.acquire() as conn:
+            # Create first-time achievements tracking table
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS kpi.first_time_achievements (
+                    staff_id TEXT,
+                    achievement_id TEXT,
+                    achieved_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (staff_id, achievement_id)
+                )
+            """)
+
+            # Get subscribed staff
+            subscribed = await conn.fetch("""
+                SELECT DISTINCT ps.staff_id, m.staff_name
+                FROM kpi.push_subscriptions ps
+                JOIN kpi.staff_list_master m ON ps.staff_id = m.staff_id
+            """)
+
+            # Get already-achieved for all staff
+            achieved = await conn.fetch("""
+                SELECT staff_id, achievement_id FROM kpi.first_time_achievements
+            """)
+            achieved_set = {(r['staff_id'], r['achievement_id']) for r in achieved}
+
+            for staff in subscribed:
+                staff_id = staff['staff_id']
+                staff_name = staff['staff_name']
+
+                # Check First RM100+ Commission Sale (single transaction with commission >= 100)
+                if (staff_id, 'first_100') not in achieved_set:
+                    has_big_sale = await conn.fetchval("""
+                        SELECT 1 FROM "AcCSD" d
+                        JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                        JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID"
+                            AND d."AcStockUOMID" = sc."AcStockUOMID"
+                        WHERE d."AcSalesmanID" = $1
+                          AND d."ItemTotal" >= 100
+                          AND sc."AcStockUDGroup1ID" IN ('FLTHB', 'FLTF1', 'FLTF2', 'FLTF3', 'FLTSC')
+                        LIMIT 1
+                    """, staff_id)
+
+                    if has_big_sale:
+                        await notify_first_time(conn, staff_id, staff_name, 'first_100',
+                            "Big Fish!", "First RM100+ commission sale! Big money energy!",
+                            notified)
+
+                # Check First Top 10
+                if (staff_id, 'first_top10') not in achieved_set:
+                    in_top10 = await conn.fetchval("""
+                        SELECT 1 FROM analytics.mv_staff_rankings
+                        WHERE staff_id = $1 AND company_rank_sales <= 10
+                    """, staff_id)
+
+                    if in_top10:
+                        await notify_first_time(conn, staff_id, staff_name, 'first_top10',
+                            "Elite Status!", FIRST_TIME_ACHIEVEMENTS.get("first_rank_top10", "TOP 10 debut!"),
+                            notified)
+
+                # Check First Target (any month where they hit 100%)
+                if (staff_id, 'first_target') not in achieved_set:
+                    hit_target = await conn.fetchval("""
+                        WITH monthly AS (
+                            SELECT
+                                EXTRACT(YEAR FROM sale_date) as yr,
+                                EXTRACT(MONTH FROM sale_date) as mo,
+                                SUM(total_sales) as total
+                            FROM analytics.mv_staff_daily_kpi
+                            WHERE staff_id = $1
+                            GROUP BY 1, 2
+                        )
+                        SELECT 1 FROM monthly m
+                        JOIN "KPITargets" t ON
+                            t.salesman_id = $1 AND
+                            t.year_month = (m.yr * 100 + m.mo)::integer
+                        WHERE m.total >= t.total_sales_target AND t.total_sales_target > 0
+                        LIMIT 1
+                    """, staff_id)
+
+                    if hit_target:
+                        await notify_first_time(conn, staff_id, staff_name, 'first_target',
+                            "Target Achieved!", FIRST_TIME_ACHIEVEMENTS.get("first_target", "First target achieved!"),
+                            notified)
+
+            return {
+                "success": True,
+                "checked": len(subscribed),
+                "notified": len(notified),
+                "details": notified
+            }
+
+    except Exception as e:
+        print(f"First-time achievements error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+
+async def notify_first_time(conn, staff_id: str, staff_name: str, achievement_id: str,
+                           title: str, message: str, notified_list: list):
+    """Helper to send first-time achievement notification and track it."""
+    full_title = f"🏆 {title}"
+
+    # Save to notifications table
+    try:
+        await conn.execute("""
+            INSERT INTO kpi.notifications (staff_id, title, message, type, data)
+            VALUES ($1, $2, $3, 'first_time', $4)
+        """, staff_id, full_title, message, json.dumps({
+            "achievement_id": achievement_id
+        }))
+    except Exception as e:
+        print(f"Failed to save first-time notification: {e}")
+
+    # Send push
+    result = await send_push_to_staff(
+        staff_id=staff_id,
+        title=full_title,
+        message=message,
+        data={"type": "first_time", "achievement_id": achievement_id}
+    )
+
+    # Mark as achieved
+    await conn.execute("""
+        INSERT INTO kpi.first_time_achievements (staff_id, achievement_id)
+        VALUES ($1, $2) ON CONFLICT DO NOTHING
+    """, staff_id, achievement_id)
+
+    notified_list.append({
+        "staff_id": staff_id,
+        "staff_name": staff_name,
+        "achievement_id": achievement_id,
+        "title": title,
+        "push_sent": result.get("success", False)
+    })
 
 
 if __name__ == "__main__":
