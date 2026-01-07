@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from starlette.middleware.gzip import GZipMiddleware
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional, List
 from pydantic import BaseModel
 import asyncpg
@@ -59,6 +59,21 @@ KPI_CATEGORIES = {
     'STOCK_CLEARANCE': 'STOCK CLEARANCE',
     'PWP': 'PWP',  # PWP uses promotion system, not UD1
 }
+
+# Malaysia Timezone (MYT = UTC+8)
+# CRITICAL: Render servers run in UTC. We must use MYT for date calculations
+# to match PostgreSQL which is configured with Asia/Kuala_Lumpur timezone.
+MYT = timezone(timedelta(hours=8))
+
+
+def get_myt_date() -> date:
+    """Get current date in Malaysia timezone (MYT = UTC+8)."""
+    return datetime.now(MYT).date()
+
+
+def get_myt_now() -> datetime:
+    """Get current datetime in Malaysia timezone (MYT = UTC+8)."""
+    return datetime.now(MYT)
 
 
 # ============================================================================
@@ -802,11 +817,11 @@ async def get_my_dashboard(
     only for today's data (small dataset, real-time).
     """
     if not start_date:
-        start_date = date.today().replace(day=1)
+        start_date = get_myt_date().replace(day=1)
     if not end_date:
-        end_date = date.today()
+        end_date = get_myt_date()
 
-    today = date.today()
+    today = get_myt_date()
     # Use timestamp range for index efficiency (avoid ::date cast which causes seq scan)
     today_start = datetime.combine(today, datetime.min.time())
     today_end = datetime.combine(today + timedelta(days=1), datetime.min.time())
@@ -994,9 +1009,9 @@ async def get_leaderboard(
         except:
             raise HTTPException(status_code=400, detail="Invalid month format")
     else:
-        period = date.today()
+        period = get_myt_date()
 
-    today = date.today()
+    today = get_myt_date()
     month_start = period.replace(day=1)
     # For current month, include up to today; for past months, include whole month
     if period.year == today.year and period.month == today.month:
@@ -1154,11 +1169,11 @@ async def get_team_overview(
     - group_id: Staff team/group for filtering assigned staff (defaults to outlet_id)
     """
     if not start_date:
-        start_date = date.today().replace(day=1)
+        start_date = get_myt_date().replace(day=1)
     if not end_date:
-        end_date = date.today()
+        end_date = get_myt_date()
 
-    today = date.today()
+    today = get_myt_date()
     today_start = datetime.combine(today, datetime.min.time())
     today_end = datetime.combine(today + timedelta(days=1), datetime.min.time())
 
@@ -1776,7 +1791,7 @@ async def export_team_performance(
         raise HTTPException(status_code=500, detail="Excel export not available - openpyxl not installed")
 
     # Parse dates
-    today = date.today()
+    today = get_myt_date()
     if start_date:
         try:
             start = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -1978,7 +1993,7 @@ async def get_outlet_performance(
     Returns KPI metrics aggregated per outlet for comparison.
     """
     # Parse dates
-    today = date.today()
+    today = get_myt_date()
     today_start = datetime.combine(today, datetime.min.time())
     today_end = datetime.combine(today + timedelta(days=1), datetime.min.time())
 
@@ -2291,7 +2306,7 @@ async def export_outlet_performance(
         raise HTTPException(status_code=500, detail="Excel export not available - openpyxl not installed")
 
     # Parse dates
-    today = date.today()
+    today = get_myt_date()
     if start_date:
         try:
             start = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -2482,7 +2497,7 @@ async def get_my_targets(
         except:
             raise HTTPException(status_code=400, detail="Invalid month format")
     else:
-        period = datetime.now()
+        period = get_myt_now()
         year_month = int(period.strftime("%Y%m"))
 
     start_date = period.replace(day=1).date()
@@ -2715,11 +2730,11 @@ async def get_my_commission(
 ):
     """Calculate commission - HYBRID: MV for history + real-time for today."""
     if not start_date:
-        start_date = date.today().replace(day=1)
+        start_date = get_myt_date().replace(day=1)
     if not end_date:
-        end_date = date.today()
+        end_date = get_myt_date()
 
-    today = date.today()
+    today = get_myt_date()
     today_start = datetime.combine(today, datetime.min.time())
     today_end = datetime.combine(today + timedelta(days=1), datetime.min.time())
 
@@ -3234,7 +3249,7 @@ async def send_morning_briefing(
     if not PUSH_AVAILABLE:
         return {"success": False, "error": "Push notifications not available"}
 
-    today = date.today()
+    today = get_myt_date()
     year_month = int(today.strftime('%Y%m'))
     days_in_month = (date(today.year, today.month + 1 if today.month < 12 else 1, 1) - timedelta(days=1)).day if today.month < 12 else 31
     days_remaining = days_in_month - today.day + 1
@@ -3334,7 +3349,7 @@ async def send_evening_recap(
     if not PUSH_AVAILABLE:
         return {"success": False, "error": "Push notifications not available"}
 
-    today = date.today()
+    today = get_myt_date()
     year_month = int(today.strftime('%Y%m'))
     days_in_month = (date(today.year, today.month + 1 if today.month < 12 else 1, 1) - timedelta(days=1)).day if today.month < 12 else 31
     expected_progress = (today.day / days_in_month) * 100
@@ -4058,7 +4073,7 @@ async def download_outlet_target_template():
             ws.cell(row=1, column=col, value=header)
 
         # Pre-fill with outlet data and current month
-        current_month = int(datetime.now().strftime('%Y%m'))
+        current_month = int(get_myt_now().strftime('%Y%m'))
         for row, outlet in enumerate(outlets, 2):
             ws.cell(row=row, column=1, value=outlet['id'])
             ws.cell(row=row, column=2, value=outlet['name'])
@@ -4214,7 +4229,7 @@ async def get_outlet_targets(
         except:
             raise HTTPException(status_code=400, detail="Invalid month format. Use YYYY-MM")
     else:
-        period = datetime.now()
+        period = get_myt_now()
 
     year_month = int(period.strftime("%Y%m"))
     start_date = period.replace(day=1).date()
@@ -4518,7 +4533,7 @@ async def check_and_notify_commission_changes(
         return {"success": False, "error": "Push notifications not available"}
 
     notified = []
-    today = date.today()
+    today = get_myt_date()
 
     try:
         async with pool.acquire() as conn:
@@ -4798,7 +4813,7 @@ async def check_and_notify_milestones(
     if not PUSH_AVAILABLE:
         return {"success": False, "error": "Push notifications not available"}
 
-    today = date.today()
+    today = get_myt_date()
     year_month = int(today.strftime('%Y%m'))
 
     # Calculate expected progress based on day of month
@@ -5046,7 +5061,7 @@ async def check_and_notify_streaks(
     if not PUSH_AVAILABLE:
         return {"success": False, "error": "Push notifications not available"}
 
-    today = date.today()
+    today = get_myt_date()
     year_month = int(today.strftime('%Y%m'))
     notified = []
 
@@ -5188,7 +5203,7 @@ async def get_staff_achievements(staff_id: str):
     Returns earned badges and progress toward next ones.
     Great for gamification display in the app.
     """
-    today = date.today()
+    today = get_myt_date()
     year_month = int(today.strftime('%Y%m'))
 
     try:
@@ -5358,7 +5373,7 @@ async def send_daily_progress_check(
     if time_of_day not in ["midday", "evening"]:
         raise HTTPException(status_code=400, detail="time_of_day must be 'midday' or 'evening'")
 
-    today = date.today()
+    today = get_myt_date()
     year_month = int(today.strftime('%Y%m'))
 
     # Calculate daily target from monthly target
@@ -5560,7 +5575,7 @@ async def check_commission_thresholds(
     if not PUSH_AVAILABLE:
         return {"success": False, "error": "Push notifications not available"}
 
-    today = date.today()
+    today = get_myt_date()
     notified = []
 
     try:
