@@ -830,6 +830,9 @@ async def get_my_dashboard(
         async with pool.acquire() as conn:
             # HYBRID APPROACH: MV for historical + real-time for today
             # Step 1: Get historical data from materialized view (fast)
+            # Get historical end date (exclude today since it comes from cache)
+            hist_end = min(end_date, today - timedelta(days=1)) if end_date >= today else end_date
+
             mv_summary = await conn.fetchrow("""
                 SELECT
                     staff_id,
@@ -846,9 +849,8 @@ async def get_my_dashboard(
                 FROM analytics.mv_staff_daily_kpi
                 WHERE staff_id = $1
                   AND sale_date BETWEEN $2 AND $3
-                  AND sale_date < CURRENT_DATE
                 GROUP BY staff_id
-            """, staff_id, start_date, end_date)
+            """, staff_id, start_date, hist_end) if start_date <= hist_end else None
 
             # Step 2: Get today's data from cache (10-40x faster than raw tables)
             # Cache is updated every 60 seconds by sync service
