@@ -1061,6 +1061,7 @@ async def get_leaderboard(
                 COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
                 COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
                 COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
+                COALESCE(SUM(k.bms_hs_sales), 0) as bms_hs_sales,
                 COALESCE(SUM(k.transactions), 0) as transactions
             FROM analytics.mv_staff_daily_kpi k
             LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
@@ -1082,7 +1083,8 @@ async def get_leaderboard(
                     focused_2_sales,
                     focused_3_sales,
                     clearance_sales,
-                    pwp_sales
+                    pwp_sales,
+                    COALESCE(bms_hs_sales, 0) as bms_hs_sales
                 FROM kpi.today_sales_cache
                 WHERE sale_date = CURRENT_DATE
             """)
@@ -1105,6 +1107,7 @@ async def get_leaderboard(
                 'focused_3': float(row['focused_3_sales'] or 0),
                 'pwp': float(row['pwp_sales'] or 0),
                 'clearance': float(row['clearance_sales'] or 0),
+                'bms_hs': float(row['bms_hs_sales'] or 0),
                 'transactions': int(row['transactions'] or 0),
             }
 
@@ -1118,6 +1121,7 @@ async def get_leaderboard(
                 combined[sid]['focused_3'] += float(tdata['focused_3_sales'] or 0)
                 combined[sid]['pwp'] += float(tdata['pwp_sales'] or 0)
                 combined[sid]['clearance'] += float(tdata['clearance_sales'] or 0)
+                combined[sid]['bms_hs'] += float(tdata['bms_hs_sales'] or 0)
                 combined[sid]['transactions'] += int(tdata['transactions'] or 0)
             else:
                 # New staff who only has today's data
@@ -1134,6 +1138,7 @@ async def get_leaderboard(
                     'focused_1': float(tdata['focused_1_sales'] or 0),
                     'focused_2': float(tdata['focused_2_sales'] or 0),
                     'focused_3': float(tdata['focused_3_sales'] or 0),
+                    'bms_hs': float(tdata['bms_hs_sales'] or 0),
                     'pwp': float(tdata['pwp_sales'] or 0),
                     'clearance': float(tdata['clearance_sales'] or 0),
                     'transactions': int(tdata['transactions'] or 0),
@@ -2073,7 +2078,8 @@ async def get_outlet_performance(
                         COALESCE(SUM(k.focused_2_sales), 0) as focused_2,
                         COALESCE(SUM(k.focused_3_sales), 0) as focused_3,
                         COALESCE(SUM(k.pwp_sales), 0) as pwp,
-                        COALESCE(SUM(k.clearance_sales), 0) as clearance
+                        COALESCE(SUM(k.clearance_sales), 0) as clearance,
+                        COALESCE(SUM(k.bms_hs_sales), 0) as bms_hs
                     FROM analytics.mv_outlet_daily_kpi k
                     LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
                     WHERE k.sale_date BETWEEN $1 AND $2
@@ -2099,7 +2105,8 @@ async def get_outlet_performance(
                         COALESCE(SUM(k.focused_2_sales), 0) as focused_2,
                         COALESCE(SUM(k.focused_3_sales), 0) as focused_3,
                         COALESCE(SUM(k.pwp_sales), 0) as pwp,
-                        COALESCE(SUM(k.clearance_sales), 0) as clearance
+                        COALESCE(SUM(k.clearance_sales), 0) as clearance,
+                        COALESCE(SUM(k.bms_hs_sales), 0) as bms_hs
                     FROM analytics.mv_outlet_daily_kpi k
                     LEFT JOIN "AcLocation" l ON k.outlet_id = l."AcLocationID"
                     WHERE k.sale_date BETWEEN $1 AND $2
@@ -2123,6 +2130,7 @@ async def get_outlet_performance(
                     'focused_3': float(o['focused_3'] or 0),
                     'pwp': float(o['pwp'] or 0),
                     'clearance': float(o['clearance'] or 0),
+                    'bms_hs': float(o['bms_hs'] or 0),
                 }
 
             # Step 2: Get today's real-time data per outlet (if date range includes today)
@@ -2139,7 +2147,8 @@ async def get_outlet_performance(
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup2ID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs
                         FROM "AcCSM" m
                         INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
                         LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
@@ -2158,7 +2167,8 @@ async def get_outlet_performance(
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup2ID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs
                         FROM "AcCSM" m
                         INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
                         LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
@@ -2177,7 +2187,7 @@ async def get_outlet_performance(
                             'outlet_name': loc['AcLocationDesc'] if loc else oid,
                             'staff_count': 0,
                             'transactions': 0, 'total_sales': 0, 'gross_profit': 0,
-                            'house_brand': 0, 'focused_1': 0, 'focused_2': 0, 'focused_3': 0, 'pwp': 0, 'clearance': 0
+                            'house_brand': 0, 'focused_1': 0, 'focused_2': 0, 'focused_3': 0, 'pwp': 0, 'clearance': 0, 'bms_hs': 0
                         }
                     outlet_data[oid]['transactions'] += int(row['transactions'] or 0)
                     outlet_data[oid]['total_sales'] += float(row['total_sales'] or 0)
@@ -2187,6 +2197,7 @@ async def get_outlet_performance(
                     outlet_data[oid]['focused_2'] += float(row['focused_2'] or 0)
                     outlet_data[oid]['focused_3'] += float(row['focused_3'] or 0)
                     outlet_data[oid]['clearance'] += float(row['clearance'] or 0)
+                    outlet_data[oid]['bms_hs'] += float(row['bms_hs'] or 0)
 
                 # Invoice sales per outlet
                 if outlet_list:
@@ -2199,7 +2210,8 @@ async def get_outlet_performance(
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup2ID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotalPrice" ELSE 0 END), 0) as bms_hs
                         FROM "AcCusInvoiceM" m
                         INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
                         LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
@@ -2217,7 +2229,8 @@ async def get_outlet_performance(
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance,
+                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup2ID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotalPrice" ELSE 0 END), 0) as bms_hs
                         FROM "AcCusInvoiceM" m
                         INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
                         LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
@@ -2235,7 +2248,7 @@ async def get_outlet_performance(
                             'outlet_name': loc['AcLocationDesc'] if loc else oid,
                             'staff_count': 0,
                             'transactions': 0, 'total_sales': 0, 'gross_profit': 0,
-                            'house_brand': 0, 'focused_1': 0, 'focused_2': 0, 'focused_3': 0, 'pwp': 0, 'clearance': 0
+                            'house_brand': 0, 'focused_1': 0, 'focused_2': 0, 'focused_3': 0, 'pwp': 0, 'clearance': 0, 'bms_hs': 0
                         }
                     outlet_data[oid]['transactions'] += int(row['transactions'] or 0)
                     outlet_data[oid]['total_sales'] += float(row['total_sales'] or 0)
@@ -2244,6 +2257,7 @@ async def get_outlet_performance(
                     outlet_data[oid]['focused_2'] += float(row['focused_2'] or 0)
                     outlet_data[oid]['focused_3'] += float(row['focused_3'] or 0)
                     outlet_data[oid]['clearance'] += float(row['clearance'] or 0)
+                    outlet_data[oid]['bms_hs'] += float(row['bms_hs'] or 0)
 
                 # PWP per outlet
                 if outlet_list:
@@ -2286,6 +2300,7 @@ async def get_outlet_performance(
             total_f3 = sum(o['focused_3'] for o in outlets_list)
             total_pwp = sum(o['pwp'] for o in outlets_list)
             total_clearance = sum(o['clearance'] for o in outlets_list)
+            total_bms_hs = sum(o.get('bms_hs', 0) for o in outlets_list)
             total_txn = sum(o['transactions'] for o in outlets_list)
             total_staff = sum(o['staff_count'] for o in outlets_list)
 
@@ -2304,6 +2319,7 @@ async def get_outlet_performance(
                         "focused_3": round(total_f3, 2),
                         "pwp": round(total_pwp, 2),
                         "clearance": round(total_clearance, 2),
+                        "bms_hs": round(total_bms_hs, 2),
                         "transactions": total_txn
                     },
                     "outlets": [
@@ -2319,6 +2335,7 @@ async def get_outlet_performance(
                             "focused_3": round(o['focused_3'], 2),
                             "pwp": round(o['pwp'], 2),
                             "clearance": round(o['clearance'], 2),
+                            "bms_hs": round(o.get('bms_hs', 0), 2),
                             "transactions": o['transactions'],
                             "rank": idx + 1
                         }
