@@ -845,7 +845,8 @@ async def get_my_dashboard(
                     COALESCE(SUM(focused_2_sales), 0) as focused_2_sales,
                     COALESCE(SUM(focused_3_sales), 0) as focused_3_sales,
                     COALESCE(SUM(pwp_sales), 0) as pwp_sales,
-                    COALESCE(SUM(clearance_sales), 0) as clearance_sales
+                    COALESCE(SUM(clearance_sales), 0) as clearance_sales,
+                    COALESCE(SUM(bms_hs_sales), 0) as bms_hs_sales
                 FROM analytics.mv_staff_daily_kpi
                 WHERE staff_id = $1
                   AND sale_date BETWEEN $2 AND $3
@@ -867,7 +868,8 @@ async def get_my_dashboard(
                         focused_2_sales AS focused_2_sales,
                         focused_3_sales AS focused_3_sales,
                         clearance_sales,
-                        pwp_sales
+                        pwp_sales,
+                        COALESCE(bms_hs_sales, 0) as bms_hs_sales
                     FROM kpi.today_sales_cache
                     WHERE staff_id = $1 AND sale_date = CURRENT_DATE
                 """, staff_id)
@@ -888,6 +890,7 @@ async def get_my_dashboard(
             focused_3 = safe_float(mv_summary['focused_3_sales'] if mv_summary else 0) + safe_float(today_summary['focused_3_sales'] if today_summary else 0)
             pwp = safe_float(mv_summary['pwp_sales'] if mv_summary else 0) + safe_float(today_summary['pwp_sales'] if today_summary else 0)
             clearance = safe_float(mv_summary['clearance_sales'] if mv_summary else 0) + safe_float(today_summary['clearance_sales'] if today_summary else 0)
+            bms_hs = safe_float(mv_summary['bms_hs_sales'] if mv_summary else 0) + safe_float(today_summary['bms_hs_sales'] if today_summary else 0)
 
             # Get outlet_id from either source
             outlet_id = (today_summary['outlet_id'] if today_summary and today_summary['outlet_id']
@@ -920,6 +923,21 @@ async def get_my_dashboard(
                 WHERE staff_id = $1
                   AND month = DATE_TRUNC('month', $2::date)
             """, staff_id, start_date)
+
+            # Get outlet BMS for tier calculation (BMS tier needs both outlet and staff totals)
+            outlet_bms_hist = await conn.fetchval("""
+                SELECT COALESCE(SUM(bms_hs_sales), 0)
+                FROM analytics.mv_outlet_daily_kpi
+                WHERE outlet_id = $1 AND sale_date BETWEEN $2 AND $3
+            """, outlet_id, start_date, hist_end) if outlet_id and start_date <= hist_end else 0
+
+            outlet_bms_today = await conn.fetchval("""
+                SELECT COALESCE(SUM(bms_hs_sales), 0)
+                FROM kpi.today_outlet_cache
+                WHERE outlet_id = $1 AND sale_date = CURRENT_DATE
+            """, outlet_id) if outlet_id and end_date >= today else 0
+
+            outlet_bms = safe_float(outlet_bms_hist) + safe_float(outlet_bms_today)
 
             # Get daily breakdown from MV (historical) + today_sales_cache
             # MV has data up to yesterday, cache has today
@@ -971,7 +989,9 @@ async def get_my_dashboard(
                         "pwp": round(pwp, 2),
                         "clearance": round(clearance, 2),
                         "transactions": transactions,
-                        "gross_profit": round(gross_profit, 2)
+                        "gross_profit": round(gross_profit, 2),
+                        "bms_hs": round(bms_hs, 2),
+                        "outlet_bms_hs": round(outlet_bms, 2)
                     },
                     "rankings": {
                         "outlet_rank": rankings['outlet_rank_sales'] if rankings else None,
