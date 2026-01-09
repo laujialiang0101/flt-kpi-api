@@ -1435,6 +1435,64 @@ async def get_team_overview(
             "clearance": sf(mv_summary['clearance_sales']) + sf(today_summary['clearance_sales'] if today_summary else 0),
         }
 
+        # BMS (Biomerit & Allife Health Supplement) sales - for tier commission tracking
+        # Query both cash sales (AcCSD) and invoice sales (AcCusInvoiceD)
+        bms_outlet_total = 0.0
+        bms_staff_data = {}  # staff_id -> bms_sales
+
+        if view_all and outlet_list:
+            bms_result = await conn.fetch("""
+                SELECT
+                    d."AcSalesmanID" as staff_id,
+                    COALESCE(SUM(d."ItemTotal"), 0) as bms_sales
+                FROM "AcCSD" d
+                INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                INNER JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID" AND d."AcStockUOMID" = sc."AcStockUOMID"
+                WHERE m."DocumentDate" BETWEEN $1 AND $2
+                  AND m."AcLocationID" = ANY($3)
+                  AND sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT')
+                  AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT'
+                GROUP BY d."AcSalesmanID"
+            """, start_date, end_date, outlet_list)
+            for row in bms_result:
+                bms_staff_data[row['staff_id']] = float(row['bms_sales'] or 0)
+                bms_outlet_total += float(row['bms_sales'] or 0)
+        elif view_all:
+            bms_result = await conn.fetch("""
+                SELECT
+                    d."AcSalesmanID" as staff_id,
+                    COALESCE(SUM(d."ItemTotal"), 0) as bms_sales
+                FROM "AcCSD" d
+                INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                INNER JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID" AND d."AcStockUOMID" = sc."AcStockUOMID"
+                WHERE m."DocumentDate" BETWEEN $1 AND $2
+                  AND sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT')
+                  AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT'
+                GROUP BY d."AcSalesmanID"
+            """, start_date, end_date)
+            for row in bms_result:
+                bms_staff_data[row['staff_id']] = float(row['bms_sales'] or 0)
+                bms_outlet_total += float(row['bms_sales'] or 0)
+        else:
+            bms_result = await conn.fetch("""
+                SELECT
+                    d."AcSalesmanID" as staff_id,
+                    COALESCE(SUM(d."ItemTotal"), 0) as bms_sales
+                FROM "AcCSD" d
+                INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
+                INNER JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID" AND d."AcStockUOMID" = sc."AcStockUOMID"
+                WHERE m."DocumentDate" BETWEEN $1 AND $2
+                  AND m."AcLocationID" = $3
+                  AND sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT')
+                  AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT'
+                GROUP BY d."AcSalesmanID"
+            """, start_date, end_date, outlet_id)
+            for row in bms_result:
+                bms_staff_data[row['staff_id']] = float(row['bms_sales'] or 0)
+                bms_outlet_total += float(row['bms_sales'] or 0)
+
+        summary["bms_hs"] = bms_outlet_total
+
         # Get outlet name
         outlet_name = "All Outlets" if view_all else None
         if not view_all:
@@ -1752,7 +1810,8 @@ async def get_team_overview(
                     "pwp": round(summary['pwp'], 2),
                     "clearance": round(summary['clearance'], 2),
                     "transactions": summary['transactions'],
-                    "staff_count": len(staff)
+                    "staff_count": len(staff),
+                    "bms_hs": round(summary.get('bms_hs', 0), 2)
                 },
                 "staff": [
                     {
@@ -1767,7 +1826,8 @@ async def get_team_overview(
                         "pwp": float(row['pwp_sales'] or 0),
                         "clearance": float(row['clearance_sales'] or 0),
                         "transactions": int(row['transactions'] or 0),
-                        "rank": row['rank']
+                        "rank": row['rank'],
+                        "bms_hs": bms_staff_data.get(row['staff_id'], 0)
                     }
                     for row in staff
                 ]
