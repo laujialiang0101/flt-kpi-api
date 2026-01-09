@@ -1220,7 +1220,8 @@ async def get_team_overview(
                     COALESCE(SUM(focused_2_sales), 0) as focused_2_sales,
                     COALESCE(SUM(focused_3_sales), 0) as focused_3_sales,
                     COALESCE(SUM(pwp_sales), 0) as pwp_sales,
-                    COALESCE(SUM(clearance_sales), 0) as clearance_sales
+                    COALESCE(SUM(clearance_sales), 0) as clearance_sales,
+                    COALESCE(SUM(bms_hs_sales), 0) as bms_hs_sales
                 FROM analytics.mv_outlet_daily_kpi
                 WHERE outlet_id = ANY($1)
                   AND sale_date BETWEEN $2 AND $3
@@ -1238,7 +1239,8 @@ async def get_team_overview(
                     COALESCE(SUM(focused_2_sales), 0) as focused_2_sales,
                     COALESCE(SUM(focused_3_sales), 0) as focused_3_sales,
                     COALESCE(SUM(pwp_sales), 0) as pwp_sales,
-                    COALESCE(SUM(clearance_sales), 0) as clearance_sales
+                    COALESCE(SUM(clearance_sales), 0) as clearance_sales,
+                    COALESCE(SUM(bms_hs_sales), 0) as bms_hs_sales
                 FROM analytics.mv_outlet_daily_kpi
                 WHERE sale_date BETWEEN $1 AND $2
                   AND sale_date < $3
@@ -1255,7 +1257,8 @@ async def get_team_overview(
                     COALESCE(SUM(focused_2_sales), 0) as focused_2_sales,
                     COALESCE(SUM(focused_3_sales), 0) as focused_3_sales,
                     COALESCE(SUM(pwp_sales), 0) as pwp_sales,
-                    COALESCE(SUM(clearance_sales), 0) as clearance_sales
+                    COALESCE(SUM(clearance_sales), 0) as clearance_sales,
+                    COALESCE(SUM(bms_hs_sales), 0) as bms_hs_sales
                 FROM analytics.mv_outlet_daily_kpi
                 WHERE outlet_id = $1
                   AND sale_date BETWEEN $2 AND $3
@@ -1433,65 +1436,11 @@ async def get_team_overview(
             "focused_3": sf(mv_summary['focused_3_sales']) + sf(today_summary['focused_3_sales'] if today_summary else 0),
             "pwp": sf(mv_summary['pwp_sales']) + sf(today_summary['pwp_sales'] if today_summary else 0),
             "clearance": sf(mv_summary['clearance_sales']) + sf(today_summary['clearance_sales'] if today_summary else 0),
+            "bms_hs": sf(mv_summary.get('bms_hs_sales', 0)),  # BMS from summary tables (fast)
         }
 
-        # BMS (Biomerit & Allife Health Supplement) sales - for tier commission tracking
-        # Query both cash sales (AcCSD) and invoice sales (AcCusInvoiceD)
-        bms_outlet_total = 0.0
+        # BMS staff data will be populated from staff MV query below
         bms_staff_data = {}  # staff_id -> bms_sales
-
-        if view_all and outlet_list:
-            bms_result = await conn.fetch("""
-                SELECT
-                    d."AcSalesmanID" as staff_id,
-                    COALESCE(SUM(d."ItemTotal"), 0) as bms_sales
-                FROM "AcCSD" d
-                INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
-                INNER JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID" AND d."AcStockUOMID" = sc."AcStockUOMID"
-                WHERE m."DocumentDate" BETWEEN $1 AND $2
-                  AND m."AcLocationID" = ANY($3)
-                  AND sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT')
-                  AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT'
-                GROUP BY d."AcSalesmanID"
-            """, start_date, end_date, outlet_list)
-            for row in bms_result:
-                bms_staff_data[row['staff_id']] = float(row['bms_sales'] or 0)
-                bms_outlet_total += float(row['bms_sales'] or 0)
-        elif view_all:
-            bms_result = await conn.fetch("""
-                SELECT
-                    d."AcSalesmanID" as staff_id,
-                    COALESCE(SUM(d."ItemTotal"), 0) as bms_sales
-                FROM "AcCSD" d
-                INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
-                INNER JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID" AND d."AcStockUOMID" = sc."AcStockUOMID"
-                WHERE m."DocumentDate" BETWEEN $1 AND $2
-                  AND sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT')
-                  AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT'
-                GROUP BY d."AcSalesmanID"
-            """, start_date, end_date)
-            for row in bms_result:
-                bms_staff_data[row['staff_id']] = float(row['bms_sales'] or 0)
-                bms_outlet_total += float(row['bms_sales'] or 0)
-        else:
-            bms_result = await conn.fetch("""
-                SELECT
-                    d."AcSalesmanID" as staff_id,
-                    COALESCE(SUM(d."ItemTotal"), 0) as bms_sales
-                FROM "AcCSD" d
-                INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
-                INNER JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID" AND d."AcStockUOMID" = sc."AcStockUOMID"
-                WHERE m."DocumentDate" BETWEEN $1 AND $2
-                  AND m."AcLocationID" = $3
-                  AND sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT')
-                  AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT'
-                GROUP BY d."AcSalesmanID"
-            """, start_date, end_date, outlet_id)
-            for row in bms_result:
-                bms_staff_data[row['staff_id']] = float(row['bms_sales'] or 0)
-                bms_outlet_total += float(row['bms_sales'] or 0)
-
-        summary["bms_hs"] = bms_outlet_total
 
         # Get outlet name
         outlet_name = "All Outlets" if view_all else None
@@ -1528,6 +1477,7 @@ async def get_team_overview(
                             COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
                             COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
                             COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
+                            COALESCE(SUM(k.bms_hs_sales), 0) as bms_hs_sales,
                             r.company_rank_sales as rank
                         FROM analytics.mv_staff_daily_kpi k
                         LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
@@ -1553,6 +1503,7 @@ async def get_team_overview(
                             COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
                             COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
                             COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
+                            COALESCE(SUM(k.bms_hs_sales), 0) as bms_hs_sales,
                             r.company_rank_sales as rank
                         FROM analytics.mv_staff_daily_kpi k
                         LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
@@ -1580,6 +1531,7 @@ async def get_team_overview(
                         'clearance_sales': float(row['clearance_sales'] or 0),
                         'rank': row['rank']
                     }
+                    bms_staff_data[sid] = float(row['bms_hs_sales'] or 0)
 
             # Step 2: Get today's data from base tables (real-time)
             if has_today:
@@ -1722,7 +1674,8 @@ async def get_team_overview(
                         COALESCE(SUM(k.focused_2_sales), 0) as focused_2_sales,
                         COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
                         COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
-                        COALESCE(SUM(k.clearance_sales), 0) as clearance_sales
+                        COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
+                        COALESCE(SUM(k.bms_hs_sales), 0) as bms_hs_sales
                     FROM analytics.mv_staff_daily_kpi k
                     WHERE k.outlet_id = $1 AND k.sale_date BETWEEN $2 AND $3
                     GROUP BY k.staff_id
@@ -1739,6 +1692,7 @@ async def get_team_overview(
                         staff_data[sid]['focused_3_sales'] += float(row['focused_3_sales'] or 0)
                         staff_data[sid]['pwp_sales'] += float(row['pwp_sales'] or 0)
                         staff_data[sid]['clearance_sales'] += float(row['clearance_sales'] or 0)
+                    bms_staff_data[sid] = bms_staff_data.get(sid, 0) + float(row['bms_hs_sales'] or 0)
 
             # Step 3: Get today's data from base tables (real-time)
             if has_today:
