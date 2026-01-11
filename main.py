@@ -2807,11 +2807,12 @@ async def get_my_commission(
             """, staff_id, start_date, end_date, today)
 
             # Step 2: Get today's commission from base tables (real-time)
+            # Uses ItemTotal (after discount) for commission calculation
             today_result = await conn.fetchrow("""
                 SELECT
                     COUNT(DISTINCT c."DocumentNo") as transaction_count,
-                    COALESCE(SUM(d."ItemAmount"), 0) as total_sales,
-                    COALESCE(SUM(d."ItemAmount" * COALESCE(s."CommissionByPercentStockPrice1", 0) / 100), 0) as commission
+                    COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
+                    COALESCE(SUM(d."ItemTotal" * COALESCE(s."CommissionByPercentStockPrice1", 0) / 100), 0) as commission
                 FROM "AcCSM" c
                 INNER JOIN "AcCSD" d ON c."DocumentNo" = d."DocumentNo"
                 LEFT JOIN "AcStockCompany" s
@@ -2819,7 +2820,7 @@ async def get_my_commission(
                     AND d."AcStockUOMID" = s."AcStockUOMID"
                 WHERE c."DocumentDate" >= $2 AND c."DocumentDate" < $3
                   AND d."AcSalesmanID" = $1
-                  AND d."ItemAmount" > 0
+                  AND d."ItemTotal" > 0
             """, staff_id, today_start, today_end)
 
             # Combine MV + today
