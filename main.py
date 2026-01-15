@@ -2148,7 +2148,7 @@ async def get_outlet_performance(
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup2ID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs
+                            COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs
                         FROM "AcCSM" m
                         INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
                         LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
@@ -2168,7 +2168,7 @@ async def get_outlet_performance(
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup2ID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs
+                            COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs
                         FROM "AcCSM" m
                         INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
                         LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
@@ -2211,7 +2211,7 @@ async def get_outlet_performance(
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup2ID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotalPrice" ELSE 0 END), 0) as bms_hs
+                            COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotalPrice" ELSE 0 END), 0) as bms_hs
                         FROM "AcCusInvoiceM" m
                         INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
                         LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
@@ -2230,7 +2230,7 @@ async def get_outlet_performance(
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup2ID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotalPrice" ELSE 0 END), 0) as bms_hs
+                            COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotalPrice" ELSE 0 END), 0) as bms_hs
                         FROM "AcCusInvoiceM" m
                         INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
                         LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
