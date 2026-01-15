@@ -1308,7 +1308,8 @@ async def get_team_overview(
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales
                     FROM "AcCSM" m
                     INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
                     LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
@@ -1325,7 +1326,8 @@ async def get_team_overview(
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotalPrice" ELSE 0 END), 0) as bms_hs_sales
                     FROM "AcCusInvoiceM" m
                     INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
                     LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
@@ -1355,7 +1357,8 @@ async def get_team_overview(
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales
                     FROM "AcCSM" m
                     INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
                     LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
@@ -1371,7 +1374,8 @@ async def get_team_overview(
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotalPrice" ELSE 0 END), 0) as bms_hs_sales
                     FROM "AcCusInvoiceM" m
                     INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
                     LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
@@ -1399,7 +1403,8 @@ async def get_team_overview(
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales
                     FROM "AcCSM" m
                     INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
                     LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
@@ -1416,7 +1421,8 @@ async def get_team_overview(
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales
+                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotalPrice" ELSE 0 END), 0) as bms_hs_sales
                     FROM "AcCusInvoiceM" m
                     INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
                     LEFT JOIN "AcStockCompany" s ON d."AcStockID" = s."AcStockID" AND d."AcStockUOMID" = s."AcStockUOMID"
@@ -1446,7 +1452,8 @@ async def get_team_overview(
                 'focused_2_sales': float(cash_result['focused_2_sales'] or 0) + float(invoice_result['focused_2_sales'] or 0),
                 'focused_3_sales': float(cash_result['focused_3_sales'] or 0) + float(invoice_result['focused_3_sales'] or 0),
                 'clearance_sales': float(cash_result['clearance_sales'] or 0) + float(invoice_result['clearance_sales'] or 0),
-                'pwp_sales': float(pwp_result['pwp_sales'] or 0)
+                'pwp_sales': float(pwp_result['pwp_sales'] or 0),
+                'bms_hs_sales': float(cash_result['bms_hs_sales'] or 0) + float(invoice_result['bms_hs_sales'] or 0)
             }
 
         # Combine MV + today
@@ -1463,7 +1470,7 @@ async def get_team_overview(
             "focused_3": sf(mv_summary['focused_3_sales']) + sf(today_summary['focused_3_sales'] if today_summary else 0),
             "pwp": sf(mv_summary['pwp_sales']) + sf(today_summary['pwp_sales'] if today_summary else 0),
             "clearance": sf(mv_summary['clearance_sales']) + sf(today_summary['clearance_sales'] if today_summary else 0),
-            "bms_hs": sf(mv_summary.get('bms_hs_sales', 0)),  # BMS from summary tables (fast)
+            "bms_hs": sf(mv_summary.get('bms_hs_sales', 0)) + sf(today_summary.get('bms_hs_sales', 0) if today_summary else 0),
         }
 
         # BMS staff data will be populated from staff MV query below
