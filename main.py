@@ -2814,27 +2814,36 @@ async def get_my_commission(
             """, staff_id, start_date, end_date, today)
 
             # Step 2: Get today's commission from base tables (real-time)
+            # Only query if date range includes today
             # Uses ItemTotal (after discount) for commission calculation
-            today_result = await conn.fetchrow("""
-                SELECT
-                    COUNT(DISTINCT c."DocumentNo") as transaction_count,
-                    COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
-                    COALESCE(SUM(d."ItemTotal" * COALESCE(s."CommissionByPercentStockPrice1", 0) / 100), 0) as commission
-                FROM "AcCSM" c
-                INNER JOIN "AcCSD" d ON c."DocumentNo" = d."DocumentNo"
-                LEFT JOIN "AcStockCompany" s
-                    ON d."AcStockID" = s."AcStockID"
-                    AND d."AcStockUOMID" = s."AcStockUOMID"
-                WHERE c."DocumentDate" >= $2 AND c."DocumentDate" < $3
-                  AND d."AcSalesmanID" = $1
-                  AND d."ItemTotal" > 0
-            """, staff_id, today_start, today_end)
+            today_commission = 0.0
+            today_transactions = 0
+            today_sales = 0.0
 
-            # Combine MV + today
-            total_transactions = int(mv_result['transaction_count'] or 0) + int(today_result['transaction_count'] or 0)
-            total_sales = float(mv_result['total_sales'] or 0) + float(today_result['total_sales'] or 0)
-            total_commission = float(mv_result['commission'] or 0) + float(today_result['commission'] or 0)
-            today_commission = float(today_result['commission'] or 0)
+            if end_date >= today:
+                today_result = await conn.fetchrow("""
+                    SELECT
+                        COUNT(DISTINCT c."DocumentNo") as transaction_count,
+                        COALESCE(SUM(d."ItemTotal"), 0) as total_sales,
+                        COALESCE(SUM(d."ItemTotal" * COALESCE(s."CommissionByPercentStockPrice1", 0) / 100), 0) as commission
+                    FROM "AcCSM" c
+                    INNER JOIN "AcCSD" d ON c."DocumentNo" = d."DocumentNo"
+                    LEFT JOIN "AcStockCompany" s
+                        ON d."AcStockID" = s."AcStockID"
+                        AND d."AcStockUOMID" = s."AcStockUOMID"
+                    WHERE c."DocumentDate" >= $2 AND c."DocumentDate" < $3
+                      AND d."AcSalesmanID" = $1
+                      AND d."ItemTotal" > 0
+                """, staff_id, today_start, today_end)
+
+                today_transactions = int(today_result['transaction_count'] or 0)
+                today_sales = float(today_result['total_sales'] or 0)
+                today_commission = float(today_result['commission'] or 0)
+
+            # Combine MV + today (today only included if date range includes today)
+            total_transactions = int(mv_result['transaction_count'] or 0) + today_transactions
+            total_sales = float(mv_result['total_sales'] or 0) + today_sales
+            total_commission = float(mv_result['commission'] or 0) + today_commission
 
             # Get commission breakdown from MV (fast, doesn't need real-time)
             breakdown = await conn.fetch("""
@@ -2847,30 +2856,38 @@ async def get_my_commission(
                   AND sale_date BETWEEN $2 AND $3
             """, staff_id, start_date, end_date)
 
+            # Build response - only include today section if date range includes today
+            includes_today = end_date >= today
+            response_data = {
+                "period": {
+                    "start": start_date.isoformat(),
+                    "end": end_date.isoformat()
+                },
+                "includes_today": includes_today,
+                "summary": {
+                    "total_sales": round(total_sales, 2),
+                    "commission_earned": round(total_commission, 2),
+                    "transaction_count": total_transactions
+                },
+                "breakdown": [
+                    {
+                        "category": row['category'],
+                        "sales": float(row['sales'] or 0),
+                        "commission": float(row['commission'] or 0)
+                    }
+                    for row in breakdown
+                ]
+            }
+
+            # Only include today section if date range includes today
+            if includes_today:
+                response_data["today"] = {
+                    "commission_earned": round(today_commission, 2)
+                }
+
             return {
                 "success": True,
-                "data": {
-                    "period": {
-                        "start": start_date.isoformat(),
-                        "end": end_date.isoformat()
-                    },
-                    "summary": {
-                        "total_sales": round(total_sales, 2),
-                        "commission_earned": round(total_commission, 2),
-                        "transaction_count": total_transactions
-                    },
-                    "today": {
-                        "commission_earned": round(today_commission, 2)
-                    },
-                    "breakdown": [
-                        {
-                            "category": row['category'],
-                            "sales": float(row['sales'] or 0),
-                            "commission": float(row['commission'] or 0)
-                        }
-                        for row in breakdown
-                    ]
-                }
+                "data": response_data
             }
 
     except Exception as e:
