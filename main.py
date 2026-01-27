@@ -65,6 +65,20 @@ KPI_CATEGORIES = {
 # to match PostgreSQL which is configured with Asia/Kuala_Lumpur timezone.
 MYT = timezone(timedelta(hours=8))
 
+# Clearance Promotion Items CTE - Used for identifying items on active clearance promotions
+# This replaces the old FLTSC/STOCK CLEARANCE logic with promotion plan effective dates
+CLEARANCE_PROMO_CTE = """
+    clearance_promo_items AS (
+        SELECT DISTINCT sc."AcStockID", sc."AcStockUOMID"
+        FROM "AcPromotionPlanSchStock" ps
+        INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+        INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+        INNER JOIN "AcStockCompany" sc ON ps."StockBarcode" = sc."StockBarcode"
+        WHERE pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+          AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+    )
+"""
+
 
 def get_myt_date() -> date:
     """Get current date in Malaysia timezone (MYT = UTC+8)."""
@@ -1308,7 +1322,15 @@ async def get_team_overview(
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM "AcPromotionPlanSchStock" ps
+                            INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+                            INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+                            INNER JOIN "AcStockCompany" sc2 ON ps."StockBarcode" = sc2."StockBarcode"
+                            WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
+                              AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+                              AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+                        ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales
                     FROM "AcCSM" m
                     INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
@@ -1326,7 +1348,15 @@ async def get_team_overview(
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM "AcPromotionPlanSchStock" ps
+                            INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+                            INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+                            INNER JOIN "AcStockCompany" sc2 ON ps."StockBarcode" = sc2."StockBarcode"
+                            WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
+                              AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+                              AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+                        ) THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotalPrice" ELSE 0 END), 0) as bms_hs_sales
                     FROM "AcCusInvoiceM" m
                     INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
@@ -1357,7 +1387,15 @@ async def get_team_overview(
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM "AcPromotionPlanSchStock" ps
+                            INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+                            INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+                            INNER JOIN "AcStockCompany" sc2 ON ps."StockBarcode" = sc2."StockBarcode"
+                            WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
+                              AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+                              AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+                        ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales
                     FROM "AcCSM" m
                     INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
@@ -1374,7 +1412,15 @@ async def get_team_overview(
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM "AcPromotionPlanSchStock" ps
+                            INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+                            INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+                            INNER JOIN "AcStockCompany" sc2 ON ps."StockBarcode" = sc2."StockBarcode"
+                            WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
+                              AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+                              AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+                        ) THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotalPrice" ELSE 0 END), 0) as bms_hs_sales
                     FROM "AcCusInvoiceM" m
                     INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
@@ -1403,7 +1449,15 @@ async def get_team_overview(
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM "AcPromotionPlanSchStock" ps
+                            INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+                            INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+                            INNER JOIN "AcStockCompany" sc2 ON ps."StockBarcode" = sc2."StockBarcode"
+                            WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
+                              AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+                              AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+                        ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales
                     FROM "AcCSM" m
                     INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
@@ -1421,7 +1475,15 @@ async def get_team_overview(
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM "AcPromotionPlanSchStock" ps
+                            INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+                            INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+                            INNER JOIN "AcStockCompany" sc2 ON ps."StockBarcode" = sc2."StockBarcode"
+                            WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
+                              AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+                              AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+                        ) THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance_sales,
                         COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotalPrice" ELSE 0 END), 0) as bms_hs_sales
                     FROM "AcCusInvoiceM" m
                     INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
@@ -1581,7 +1643,15 @@ async def get_team_overview(
                             COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
                             COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
                             COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
-                            COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTSC' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                            COALESCE(SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM "AcPromotionPlanSchStock" ps
+                            INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+                            INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+                            INNER JOIN "AcStockCompany" sc2 ON ps."StockBarcode" = sc2."StockBarcode"
+                            WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
+                              AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+                              AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+                        ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
                         FROM "AcCSD" d
                         INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
                         LEFT JOIN "AcSalesman" s ON d."AcSalesmanID" = s."AcSalesmanID"
@@ -1602,7 +1672,15 @@ async def get_team_overview(
                             COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
                             COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
                             COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
-                            COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTSC' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                            COALESCE(SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM "AcPromotionPlanSchStock" ps
+                            INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+                            INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+                            INNER JOIN "AcStockCompany" sc2 ON ps."StockBarcode" = sc2."StockBarcode"
+                            WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
+                              AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+                              AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+                        ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
                         FROM "AcCSD" d
                         INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
                         LEFT JOIN "AcSalesman" s ON d."AcSalesmanID" = s."AcSalesmanID"
@@ -1739,7 +1817,15 @@ async def get_team_overview(
                         COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1_sales,
                         COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2_sales,
                         COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3_sales,
-                        COALESCE(SUM(CASE WHEN sc."AcStockUDGroup1ID" = 'FLTSC' THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                        COALESCE(SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM "AcPromotionPlanSchStock" ps
+                            INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+                            INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+                            INNER JOIN "AcStockCompany" sc2 ON ps."StockBarcode" = sc2."StockBarcode"
+                            WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
+                              AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+                              AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+                        ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
                     FROM "AcCSD" d
                     INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
                     LEFT JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID" AND d."AcStockUOMID" = sc."AcStockUOMID"
@@ -2154,7 +2240,15 @@ async def get_outlet_performance(
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance,
+                            COALESCE(SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM "AcPromotionPlanSchStock" ps
+                            INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+                            INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+                            INNER JOIN "AcStockCompany" sc2 ON ps."StockBarcode" = sc2."StockBarcode"
+                            WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
+                              AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+                              AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+                        ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance,
                             COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs
                         FROM "AcCSM" m
                         INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
@@ -2174,7 +2268,15 @@ async def get_outlet_performance(
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotal" ELSE 0 END), 0) as focused_1,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotal" ELSE 0 END), 0) as focused_2,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotal" ELSE 0 END), 0) as focused_3,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotal" ELSE 0 END), 0) as clearance,
+                            COALESCE(SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM "AcPromotionPlanSchStock" ps
+                            INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+                            INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+                            INNER JOIN "AcStockCompany" sc2 ON ps."StockBarcode" = sc2."StockBarcode"
+                            WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
+                              AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+                              AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+                        ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance,
                             COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs
                         FROM "AcCSM" m
                         INNER JOIN "AcCSD" d ON m."DocumentNo" = d."DocumentNo"
@@ -2217,7 +2319,15 @@ async def get_outlet_performance(
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance,
+                            COALESCE(SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM "AcPromotionPlanSchStock" ps
+                            INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+                            INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+                            INNER JOIN "AcStockCompany" sc2 ON ps."StockBarcode" = sc2."StockBarcode"
+                            WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
+                              AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+                              AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+                        ) THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance,
                             COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotalPrice" ELSE 0 END), 0) as bms_hs
                         FROM "AcCusInvoiceM" m
                         INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
@@ -2236,7 +2346,15 @@ async def get_outlet_performance(
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF1' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_1,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF2' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_2,
                             COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'FLTF3' THEN d."ItemTotalPrice" ELSE 0 END), 0) as focused_3,
-                            COALESCE(SUM(CASE WHEN s."AcStockUDGroup1ID" = 'STOCK CLEARANCE' THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance,
+                            COALESCE(SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM "AcPromotionPlanSchStock" ps
+                            INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+                            INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+                            INNER JOIN "AcStockCompany" sc2 ON ps."StockBarcode" = sc2."StockBarcode"
+                            WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
+                              AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+                              AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+                        ) THEN d."ItemTotalPrice" ELSE 0 END), 0) as clearance,
                             COALESCE(SUM(CASE WHEN s."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND s."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotalPrice" ELSE 0 END), 0) as bms_hs
                         FROM "AcCusInvoiceM" m
                         INNER JOIN "AcCusInvoiceD" d ON m."AcCusInvoiceMID" = d."AcCusInvoiceMID"
@@ -5835,7 +5953,18 @@ async def check_first_time_achievements(
                             AND d."AcStockUOMID" = sc."AcStockUOMID"
                         WHERE d."AcSalesmanID" = $1
                           AND d."ItemTotal" >= 100
-                          AND sc."AcStockUDGroup1ID" IN ('FLTHB', 'FLTF1', 'FLTF2', 'FLTF3', 'FLTSC')
+                          AND (
+                            sc."AcStockUDGroup1ID" IN ('FLTHB', 'FLTF1', 'FLTF2', 'FLTF3')
+                            OR EXISTS (
+                                SELECT 1 FROM "AcPromotionPlanSchStock" ps
+                                INNER JOIN "AcPromotionPlanSchPromoMBatch" b ON ps."AcPromotionPlanSchPromoMBatchID" = b."AcPromotionPlanSchPromoMBatchID"
+                                INNER JOIN "AcPromotionPlanSchPromoM" pm ON b."AcPromotionPlanSchPromoMID" = pm."AcPromotionPlanSchPromoMID"
+                                INNER JOIN "AcStockCompany" sc2 ON ps."StockBarcode" = sc2."StockBarcode"
+                                WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
+                                  AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
+                                  AND m."DocumentDate"::date BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
+                            )
+                          )
                         LIMIT 1
                     """, staff_id)
 
