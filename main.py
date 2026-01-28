@@ -860,7 +860,8 @@ async def get_my_dashboard(
                     COALESCE(SUM(focused_3_sales), 0) as focused_3_sales,
                     COALESCE(SUM(pwp_sales), 0) as pwp_sales,
                     COALESCE(SUM(clearance_sales), 0) as clearance_sales,
-                    COALESCE(SUM(bms_hs_sales), 0) as bms_hs_sales
+                    COALESCE(SUM(bms_hs_sales), 0) as bms_hs_sales,
+                    COALESCE(SUM(commission), 0) as commission
                 FROM analytics.mv_staff_daily_kpi
                 WHERE staff_id = $1
                   AND sale_date BETWEEN $2 AND $3
@@ -883,7 +884,8 @@ async def get_my_dashboard(
                         focused_3_sales AS focused_3_sales,
                         clearance_sales,
                         pwp_sales,
-                        COALESCE(bms_hs_sales, 0) as bms_hs_sales
+                        COALESCE(bms_hs_sales, 0) as bms_hs_sales,
+                        COALESCE(commission, 0) as commission
                     FROM kpi.today_sales_cache
                     WHERE staff_id = $1 AND sale_date = CURRENT_DATE
                 """, staff_id)
@@ -905,6 +907,8 @@ async def get_my_dashboard(
             pwp = safe_float(mv_summary['pwp_sales'] if mv_summary else 0) + safe_float(today_summary['pwp_sales'] if today_summary else 0)
             clearance = safe_float(mv_summary['clearance_sales'] if mv_summary else 0) + safe_float(today_summary['clearance_sales'] if today_summary else 0)
             bms_hs = safe_float(mv_summary['bms_hs_sales'] if mv_summary else 0) + safe_float(today_summary['bms_hs_sales'] if today_summary else 0)
+            commission = safe_float(mv_summary['commission'] if mv_summary else 0) + safe_float(today_summary['commission'] if today_summary else 0)
+            today_commission = safe_float(today_summary['commission'] if today_summary else 0)
 
             # Get outlet_id from either source
             outlet_id = (today_summary['outlet_id'] if today_summary and today_summary['outlet_id']
@@ -1005,7 +1009,9 @@ async def get_my_dashboard(
                         "transactions": transactions,
                         "gross_profit": round(gross_profit, 2),
                         "bms_hs": round(bms_hs, 2),
-                        "outlet_bms_hs": round(outlet_bms, 2)
+                        "outlet_bms_hs": round(outlet_bms, 2),
+                        "commission": round(commission, 2),
+                        "today_commission": round(today_commission, 2)
                     },
                     "rankings": {
                         "outlet_rank": rankings['outlet_rank_sales'] if rankings else None,
