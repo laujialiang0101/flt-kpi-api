@@ -1651,7 +1651,8 @@ async def get_team_overview(
                             WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
                               AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
                               AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
-                        ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                        ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales
                         FROM "AcCSD" d
                         INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
                         LEFT JOIN "AcSalesman" s ON d."AcSalesmanID" = s."AcSalesmanID"
@@ -1680,7 +1681,8 @@ async def get_team_overview(
                             WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
                               AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
                               AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
-                        ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                        ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales
                         FROM "AcCSD" d
                         INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
                         LEFT JOIN "AcSalesman" s ON d."AcSalesmanID" = s."AcSalesmanID"
@@ -1741,6 +1743,8 @@ async def get_team_overview(
                             'clearance_sales': float(row['clearance_sales'] or 0),
                             'rank': None
                         }
+                    # Add today's BMS to bms_staff_data
+                    bms_staff_data[sid] = bms_staff_data.get(sid, 0) + float(row['bms_hs_sales'] or 0)
 
             # Convert to list and sort
             staff = sorted(staff_data.values(), key=lambda x: x['total_sales'], reverse=True)
@@ -1825,7 +1829,8 @@ async def get_team_overview(
                             WHERE sc2."AcStockID" = d."AcStockID" AND sc2."AcStockUOMID" = d."AcStockUOMID"
                               AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
                               AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
-                        ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales
+                        ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
+                        COALESCE(SUM(CASE WHEN sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales
                     FROM "AcCSD" d
                     INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
                     LEFT JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID" AND d."AcStockUOMID" = sc."AcStockUOMID"
@@ -1859,6 +1864,8 @@ async def get_team_overview(
                         staff_data[sid]['focused_3_sales'] += float(row['focused_3_sales'] or 0)
                         staff_data[sid]['clearance_sales'] += float(row['clearance_sales'] or 0)
                         staff_data[sid]['pwp_sales'] += pwp_map.get(sid, 0)
+                    # Add today's BMS to bms_staff_data
+                    bms_staff_data[sid] = bms_staff_data.get(sid, 0) + float(row['bms_hs_sales'] or 0)
 
             # Convert to list and sort
             staff = sorted(staff_data.values(), key=lambda x: x['total_sales'], reverse=True)
