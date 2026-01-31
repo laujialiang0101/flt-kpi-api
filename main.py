@@ -981,7 +981,7 @@ async def get_my_dashboard(
                         outlet_id,
                         RANK() OVER (PARTITION BY outlet_id ORDER BY total_sales DESC) as outlet_rank_sales,
                         RANK() OVER (ORDER BY total_sales DESC) as company_rank_sales,
-                        ROUND(PERCENT_RANK() OVER (ORDER BY total_sales ASC) * 100, 1) as sales_percentile
+                        ROUND((PERCENT_RANK() OVER (ORDER BY total_sales ASC) * 100)::numeric, 1) as sales_percentile
                     FROM combined
                 )
                 SELECT outlet_rank_sales, company_rank_sales, sales_percentile
