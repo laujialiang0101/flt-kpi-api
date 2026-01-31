@@ -2010,6 +2010,16 @@ async def get_team_overview(
         else:
             target_map = {}
 
+        # Batch fetch role for PIC indicator
+        role_map = {}
+        if staff_ids:
+            role_rows = await conn.fetch("""
+                SELECT staff_id, role, primary_outlet
+                FROM kpi.staff_list_master
+                WHERE staff_id = ANY($1)
+            """, staff_ids)
+            role_map = {r['staff_id']: {'role': r['role'], 'primary_outlet': r['primary_outlet']} for r in role_rows}
+
         return {
             "success": True,
             "data": {
@@ -2038,6 +2048,7 @@ async def get_team_overview(
                     {
                         "staff_id": row['staff_id'],
                         "staff_name": row['staff_name'] or "Unknown",
+                        "is_pic": role_map.get(row['staff_id'], {}).get('role') == 'pic',
                         "outlet_id": row.get('outlet_id') if view_all else None,
                         "total_sales": float(row['total_sales'] or 0),
                         "house_brand": float(row['house_brand_sales'] or 0),
