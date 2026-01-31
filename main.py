@@ -947,13 +947,47 @@ async def get_my_dashboard(
                 SELECT "AcLocationDesc" as outlet_name FROM "AcLocation" WHERE "AcLocationID" = $1
             """, outlet_id)
 
-            # Get rankings from MV
+            # Get LIVE rankings using hybrid data (MV + today cache)
+            # This replaces stale mv_staff_rankings to ensure consistency with leaderboard
             rankings = await conn.fetchrow("""
+                WITH mv_staff AS (
+                    SELECT staff_id, MAX(outlet_id) as outlet_id,
+                           COALESCE(SUM(total_sales), 0) as total
+                    FROM analytics.mv_staff_daily_kpi
+                    WHERE sale_date >= DATE_TRUNC('month', $1::date)
+                      AND sale_date < CURRENT_DATE
+                    GROUP BY staff_id
+                ),
+                today_staff AS (
+                    SELECT staff_id, outlet_id,
+                           COALESCE(total_sales, 0) as total
+                    FROM kpi.today_sales_cache
+                    WHERE sale_date = CURRENT_DATE
+                      AND CURRENT_DATE >= DATE_TRUNC('month', $1::date)
+                      AND CURRENT_DATE < DATE_TRUNC('month', $1::date) + INTERVAL '1 month'
+                ),
+                combined AS (
+                    SELECT
+                        COALESCE(m.staff_id, t.staff_id) as staff_id,
+                        COALESCE(m.outlet_id, t.outlet_id) as outlet_id,
+                        COALESCE(m.total, 0) + COALESCE(t.total, 0) as total_sales
+                    FROM mv_staff m
+                    FULL OUTER JOIN today_staff t ON m.staff_id = t.staff_id
+                    WHERE COALESCE(m.total, 0) + COALESCE(t.total, 0) > 0
+                ),
+                ranked AS (
+                    SELECT
+                        staff_id,
+                        outlet_id,
+                        RANK() OVER (PARTITION BY outlet_id ORDER BY total_sales DESC) as outlet_rank_sales,
+                        RANK() OVER (ORDER BY total_sales DESC) as company_rank_sales,
+                        ROUND(PERCENT_RANK() OVER (ORDER BY total_sales ASC) * 100, 1) as sales_percentile
+                    FROM combined
+                )
                 SELECT outlet_rank_sales, company_rank_sales, sales_percentile
-                FROM analytics.mv_staff_rankings
-                WHERE staff_id = $1
-                  AND month = DATE_TRUNC('month', $2::date)
-            """, staff_id, start_date)
+                FROM ranked
+                WHERE staff_id = $2
+            """, start_date, staff_id)
 
             # Get outlet BMS for tier calculation (BMS tier needs both outlet and staff totals)
             outlet_bms_hist = await conn.fetchval("""
@@ -2013,14 +2047,14 @@ async def get_team_overview(
                         "pwp": float(row['pwp_sales'] or 0),
                         "clearance": float(row['clearance_sales'] or 0),
                         "transactions": int(row['transactions'] or 0),
-                        "rank": row['rank'],
+                        "rank": idx + 1,
                         "bms_hs": bms_staff_data.get(row['staff_id'], 0),
                         "commission": round(float(row.get('commission', 0) or 0), 2),
                         "bms_incentive": round(float(row.get('bms_incentive', 0)), 2),
                         "total_commission": round(float(row.get('commission', 0) or 0) + float(row.get('bms_incentive', 0)), 2),
                         "targets": target_map.get(row['staff_id']),
                     }
-                    for row in staff
+                    for idx, row in enumerate(staff)
                 ]
             }
         }
@@ -2846,20 +2880,47 @@ async def get_my_targets(
                 WHERE salesman_id = $1 AND year_month = $2
             """, staff_id, year_month)
 
-            # Get current KPI values
+            # Get current KPI values - HYBRID: MV for history + cache for today
             current = await conn.fetchrow("""
                 SELECT
-                    SUM(total_sales) as total_sales,
-                    SUM(house_brand_sales) as house_brand,
-                    SUM(focused_1_sales) as focused_1,
-                    SUM(COALESCE(focused_2_sales, 0)) as focused_2,
-                    SUM(COALESCE(focused_3_sales, 0)) as focused_3,
-                    SUM(COALESCE(clearance_sales, 0)) as clearance,
-                    SUM(COALESCE(pwp_sales, 0)) as pwp,
-                    SUM(transactions) as transactions
-                FROM analytics.mv_staff_daily_kpi
-                WHERE staff_id = $1
-                  AND sale_date BETWEEN $2 AND $3
+                    COALESCE(mv.total_sales, 0) + COALESCE(tc.total_sales, 0) as total_sales,
+                    COALESCE(mv.house_brand, 0) + COALESCE(tc.house_brand_sales, 0) as house_brand,
+                    COALESCE(mv.focused_1, 0) + COALESCE(tc.focused_1_sales, 0) as focused_1,
+                    COALESCE(mv.focused_2, 0) + COALESCE(tc.focused_2_sales, 0) as focused_2,
+                    COALESCE(mv.focused_3, 0) + COALESCE(tc.focused_3_sales, 0) as focused_3,
+                    COALESCE(mv.clearance, 0) + COALESCE(tc.clearance_sales, 0) as clearance,
+                    COALESCE(mv.pwp, 0) + COALESCE(tc.pwp_sales, 0) as pwp,
+                    COALESCE(mv.transactions, 0) + COALESCE(tc.transactions, 0) as transactions
+                FROM (
+                    SELECT
+                        SUM(total_sales) as total_sales,
+                        SUM(house_brand_sales) as house_brand,
+                        SUM(focused_1_sales) as focused_1,
+                        SUM(COALESCE(focused_2_sales, 0)) as focused_2,
+                        SUM(COALESCE(focused_3_sales, 0)) as focused_3,
+                        SUM(COALESCE(clearance_sales, 0)) as clearance,
+                        SUM(COALESCE(pwp_sales, 0)) as pwp,
+                        SUM(transactions) as transactions
+                    FROM analytics.mv_staff_daily_kpi
+                    WHERE staff_id = $1
+                      AND sale_date BETWEEN $2 AND $3
+                      AND sale_date < CURRENT_DATE
+                ) mv
+                CROSS JOIN (
+                    SELECT
+                        COALESCE(SUM(total_sales), 0) as total_sales,
+                        COALESCE(SUM(house_brand_sales), 0) as house_brand_sales,
+                        COALESCE(SUM(focused_1_sales), 0) as focused_1_sales,
+                        COALESCE(SUM(focused_2_sales), 0) as focused_2_sales,
+                        COALESCE(SUM(focused_3_sales), 0) as focused_3_sales,
+                        COALESCE(SUM(clearance_sales), 0) as clearance_sales,
+                        COALESCE(SUM(pwp_sales), 0) as pwp_sales,
+                        COALESCE(SUM(transactions), 0) as transactions
+                    FROM kpi.today_sales_cache
+                    WHERE staff_id = $1
+                      AND sale_date = CURRENT_DATE
+                      AND CURRENT_DATE BETWEEN $2 AND $3
+                ) tc
             """, staff_id, start_date, end_date)
 
             def calc_progress(current_val, target_val):
@@ -3126,16 +3187,36 @@ async def get_my_commission(
             total_sales = float(mv_result['total_sales'] or 0) + today_sales
             total_commission = float(mv_result['commission'] or 0) + today_commission
 
-            # Get commission breakdown from MV (fast, doesn't need real-time)
+            # Get commission breakdown - HYBRID: MV for history + today's real-time
             breakdown = await conn.fetch("""
                 SELECT
                     'COMBINED' as category,
-                    SUM(total_sales) as sales,
-                    SUM(commission) as commission
+                    COALESCE(SUM(total_sales), 0) as sales,
+                    COALESCE(SUM(commission), 0) as commission
                 FROM analytics.mv_staff_daily_commission
                 WHERE staff_id = $1
                   AND sale_date BETWEEN $2 AND $3
-            """, staff_id, start_date, end_date)
+                  AND sale_date < $4
+            """, staff_id, start_date, end_date, today)
+
+            # Add today's data to breakdown if applicable
+            if includes_today and today_sales > 0:
+                if breakdown:
+                    breakdown = [
+                        {
+                            'category': 'COMBINED',
+                            'sales': float(breakdown[0]['sales'] or 0) + today_sales,
+                            'commission': float(breakdown[0]['commission'] or 0) + today_commission,
+                        }
+                    ]
+                else:
+                    breakdown = [
+                        {
+                            'category': 'COMBINED',
+                            'sales': today_sales,
+                            'commission': today_commission,
+                        }
+                    ]
 
             # Build response - only include today section if date range includes today
             includes_today = end_date >= today
