@@ -2048,7 +2048,7 @@ async def get_team_overview(
                     {
                         "staff_id": row['staff_id'],
                         "staff_name": row['staff_name'] or "Unknown",
-                        "is_pic": role_map.get(row['staff_id'], {}).get('role') == 'pic',
+                        "is_pic": role_map.get(row['staff_id'], {}).get('role') in ('pic', 'area_manager'),
                         "outlet_id": row.get('outlet_id') if view_all else None,
                         "total_sales": float(row['total_sales'] or 0),
                         "house_brand": float(row['house_brand_sales'] or 0),
