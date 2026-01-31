@@ -60,6 +60,19 @@ KPI_CATEGORIES = {
     'PWP': 'PWP',  # PWP uses promotion system, not UD1
 }
 
+# BMS Tier Commission structure - ordered highest to lowest
+# Outlet must hit outletMin AND staff must hit staffMin to qualify for incentive
+BMS_TIERS = [
+    {'outlet_min': 60000, 'staff_min': 12000, 'incentive': 840},
+    {'outlet_min': 60000, 'staff_min': 10000, 'incentive': 600},
+    {'outlet_min': 50000, 'staff_min': 8500, 'incentive': 500},
+    {'outlet_min': 40000, 'staff_min': 7000, 'incentive': 400},
+    {'outlet_min': 30000, 'staff_min': 6000, 'incentive': 300},
+    {'outlet_min': 25000, 'staff_min': 5000, 'incentive': 200},
+    {'outlet_min': 20000, 'staff_min': 4000, 'incentive': 100},
+    {'outlet_min': 15000, 'staff_min': 3500, 'incentive': 50},
+]
+
 # Malaysia Timezone (MYT = UTC+8)
 # CRITICAL: Render servers run in UTC. We must use MYT for date calculations
 # to match PostgreSQL which is configured with Asia/Kuala_Lumpur timezone.
@@ -1580,6 +1593,7 @@ async def get_team_overview(
                             COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
                             COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
                             COALESCE(SUM(k.bms_hs_sales), 0) as bms_hs_sales,
+                            COALESCE(SUM(k.commission), 0) as commission,
                             r.company_rank_sales as rank
                         FROM analytics.mv_staff_daily_kpi k
                         LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
@@ -1606,6 +1620,7 @@ async def get_team_overview(
                             COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
                             COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
                             COALESCE(SUM(k.bms_hs_sales), 0) as bms_hs_sales,
+                            COALESCE(SUM(k.commission), 0) as commission,
                             r.company_rank_sales as rank
                         FROM analytics.mv_staff_daily_kpi k
                         LEFT JOIN "AcSalesman" s ON k.staff_id = s."AcSalesmanID"
@@ -1631,6 +1646,7 @@ async def get_team_overview(
                         'focused_3_sales': float(row['focused_3_sales'] or 0),
                         'pwp_sales': float(row['pwp_sales'] or 0),
                         'clearance_sales': float(row['clearance_sales'] or 0),
+                        'commission': float(row['commission'] or 0),
                         'rank': row['rank']
                     }
                     bms_staff_data[sid] = float(row['bms_hs_sales'] or 0)
@@ -1658,7 +1674,8 @@ async def get_team_overview(
                               AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
                               AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
                         ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
-                        COALESCE(SUM(CASE WHEN sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales
+                        COALESCE(SUM(CASE WHEN sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales,
+                        COALESCE(SUM(d."ItemTotal" * COALESCE(sc."CommissionByPercentStockPrice1", 0) / 100), 0) as commission
                         FROM "AcCSD" d
                         INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
                         LEFT JOIN "AcSalesman" s ON d."AcSalesmanID" = s."AcSalesmanID"
@@ -1688,7 +1705,8 @@ async def get_team_overview(
                               AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
                               AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
                         ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
-                        COALESCE(SUM(CASE WHEN sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales
+                        COALESCE(SUM(CASE WHEN sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales,
+                        COALESCE(SUM(d."ItemTotal" * COALESCE(sc."CommissionByPercentStockPrice1", 0) / 100), 0) as commission
                         FROM "AcCSD" d
                         INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
                         LEFT JOIN "AcSalesman" s ON d."AcSalesmanID" = s."AcSalesmanID"
@@ -1734,6 +1752,7 @@ async def get_team_overview(
                         staff_data[sid]['focused_3_sales'] += float(row['focused_3_sales'] or 0)
                         staff_data[sid]['clearance_sales'] += float(row['clearance_sales'] or 0)
                         staff_data[sid]['pwp_sales'] += pwp_map.get(sid, 0)
+                        staff_data[sid]['commission'] += float(row['commission'] or 0)
                     else:
                         staff_data[sid] = {
                             'staff_id': sid,
@@ -1747,6 +1766,7 @@ async def get_team_overview(
                             'focused_3_sales': float(row['focused_3_sales'] or 0),
                             'pwp_sales': pwp_map.get(sid, 0),
                             'clearance_sales': float(row['clearance_sales'] or 0),
+                            'commission': float(row['commission'] or 0),
                             'rank': None
                         }
                     # Add today's BMS to bms_staff_data
@@ -1781,6 +1801,7 @@ async def get_team_overview(
                     'focused_3_sales': 0,
                     'pwp_sales': 0,
                     'clearance_sales': 0,
+                    'commission': 0,
                     'rank': row['rank']
                 }
 
@@ -1797,7 +1818,8 @@ async def get_team_overview(
                         COALESCE(SUM(k.focused_3_sales), 0) as focused_3_sales,
                         COALESCE(SUM(k.pwp_sales), 0) as pwp_sales,
                         COALESCE(SUM(k.clearance_sales), 0) as clearance_sales,
-                        COALESCE(SUM(k.bms_hs_sales), 0) as bms_hs_sales
+                        COALESCE(SUM(k.bms_hs_sales), 0) as bms_hs_sales,
+                        COALESCE(SUM(k.commission), 0) as commission
                     FROM analytics.mv_staff_daily_kpi k
                     WHERE k.outlet_id = $1 AND k.sale_date BETWEEN $2 AND $3
                     GROUP BY k.staff_id
@@ -1814,6 +1836,7 @@ async def get_team_overview(
                         staff_data[sid]['focused_3_sales'] += float(row['focused_3_sales'] or 0)
                         staff_data[sid]['pwp_sales'] += float(row['pwp_sales'] or 0)
                         staff_data[sid]['clearance_sales'] += float(row['clearance_sales'] or 0)
+                        staff_data[sid]['commission'] += float(row['commission'] or 0)
                     bms_staff_data[sid] = bms_staff_data.get(sid, 0) + float(row['bms_hs_sales'] or 0)
 
             # Step 3: Get today's data from base tables (real-time)
@@ -1836,7 +1859,8 @@ async def get_team_overview(
                               AND pm."AcPromotionPlanSchPromoMDesc" ILIKE '%CLEARANCE%'
                               AND CURRENT_DATE BETWEEN pm."SchPromoStartDate"::date AND pm."SchPromoEndDate"::date
                         ) THEN d."ItemTotal" ELSE 0 END), 0) as clearance_sales,
-                        COALESCE(SUM(CASE WHEN sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales
+                        COALESCE(SUM(CASE WHEN sc."AcStockBrandID" IN ('ALLIFE', 'BIO MERIT') AND sc."AcStockCategoryID" = 'HEALTH SUPPLEMENT' THEN d."ItemTotal" ELSE 0 END), 0) as bms_hs_sales,
+                        COALESCE(SUM(d."ItemTotal" * COALESCE(sc."CommissionByPercentStockPrice1", 0) / 100), 0) as commission
                     FROM "AcCSD" d
                     INNER JOIN "AcCSM" m ON d."DocumentNo" = m."DocumentNo"
                     LEFT JOIN "AcStockCompany" sc ON d."AcStockID" = sc."AcStockID" AND d."AcStockUOMID" = sc."AcStockUOMID"
@@ -1870,11 +1894,43 @@ async def get_team_overview(
                         staff_data[sid]['focused_3_sales'] += float(row['focused_3_sales'] or 0)
                         staff_data[sid]['clearance_sales'] += float(row['clearance_sales'] or 0)
                         staff_data[sid]['pwp_sales'] += pwp_map.get(sid, 0)
+                        staff_data[sid]['commission'] += float(row['commission'] or 0)
                     # Add today's BMS to bms_staff_data
                     bms_staff_data[sid] = bms_staff_data.get(sid, 0) + float(row['bms_hs_sales'] or 0)
 
             # Convert to list and sort
             staff = sorted(staff_data.values(), key=lambda x: x['total_sales'], reverse=True)
+
+        # Calculate BMS tier incentive per staff
+        # First, compute per-outlet BMS totals
+        outlet_bms = {}
+        for sid, s in staff_data.items():
+            oid = s.get('outlet_id', staff_group)
+            outlet_bms[oid] = outlet_bms.get(oid, 0) + bms_staff_data.get(sid, 0)
+
+        for sid, s in staff_data.items():
+            oid = s.get('outlet_id', staff_group)
+            outlet_total_bms = outlet_bms.get(oid, 0)
+            staff_bms = bms_staff_data.get(sid, 0)
+            bms_incentive = 0
+            for tier in BMS_TIERS:
+                if outlet_total_bms >= tier['outlet_min'] and staff_bms >= tier['staff_min']:
+                    bms_incentive = tier['incentive']
+                    break
+            s['bms_incentive'] = bms_incentive
+
+        # Batch fetch staff targets for the month
+        month_str = start_date.strftime('%Y%m')
+        staff_ids = [s['staff_id'] for s in staff_data.values()]
+        if staff_ids:
+            target_rows = await conn.fetch("""
+                SELECT salesman_id, total_sales_target
+                FROM "KPITargets"
+                WHERE year_month = $1 AND salesman_id = ANY($2)
+            """, int(month_str), staff_ids)
+            target_map = {r['salesman_id']: float(r['total_sales_target'] or 0) for r in target_rows}
+        else:
+            target_map = {}
 
         return {
             "success": True,
@@ -1904,7 +1960,7 @@ async def get_team_overview(
                     {
                         "staff_id": row['staff_id'],
                         "staff_name": row['staff_name'] or "Unknown",
-                        "outlet_id": row.get('outlet_id') if view_all else None,  # Show outlet for all-outlets view
+                        "outlet_id": row.get('outlet_id') if view_all else None,
                         "total_sales": float(row['total_sales'] or 0),
                         "house_brand": float(row['house_brand_sales'] or 0),
                         "focused_1": float(row['focused_1_sales'] or 0),
@@ -1914,7 +1970,12 @@ async def get_team_overview(
                         "clearance": float(row['clearance_sales'] or 0),
                         "transactions": int(row['transactions'] or 0),
                         "rank": row['rank'],
-                        "bms_hs": bms_staff_data.get(row['staff_id'], 0)
+                        "bms_hs": bms_staff_data.get(row['staff_id'], 0),
+                        "commission": round(float(row.get('commission', 0) or 0), 2),
+                        "bms_incentive": round(float(row.get('bms_incentive', 0)), 2),
+                        "total_commission": round(float(row.get('commission', 0) or 0) + float(row.get('bms_incentive', 0)), 2),
+                        "target_total_sales": target_map.get(row['staff_id'], 0),
+                        "target_progress": round(float(row['total_sales'] or 0) / target_map[row['staff_id']] * 100, 1) if target_map.get(row['staff_id']) else None,
                     }
                     for row in staff
                 ]
@@ -2426,6 +2487,19 @@ async def get_outlet_performance(
                     if oid in outlet_data:
                         outlet_data[oid]['pwp'] += float(row['pwp'] or 0)
 
+            # Batch fetch outlet targets for the month
+            month_str = start.strftime('%Y%m')
+            outlet_ids_list = list(outlet_data.keys())
+            if outlet_ids_list:
+                outlet_target_rows = await conn.fetch("""
+                    SELECT outlet_id, total_sales_target
+                    FROM "OutletTargets"
+                    WHERE year_month = $1 AND outlet_id = ANY($2)
+                """, int(month_str), outlet_ids_list)
+                outlet_target_map = {r['outlet_id']: float(r['total_sales_target'] or 0) for r in outlet_target_rows}
+            else:
+                outlet_target_map = {}
+
             # Sort by total_sales descending
             outlets_list = sorted(outlet_data.values(), key=lambda x: x['total_sales'], reverse=True)
 
@@ -2475,7 +2549,9 @@ async def get_outlet_performance(
                             "clearance": round(o['clearance'], 2),
                             "bms_hs": round(o.get('bms_hs', 0), 2),
                             "transactions": o['transactions'],
-                            "rank": idx + 1
+                            "rank": idx + 1,
+                            "target_total_sales": outlet_target_map.get(o['outlet_id'], 0),
+                            "target_progress": round(o['total_sales'] / outlet_target_map[o['outlet_id']] * 100, 1) if outlet_target_map.get(o['outlet_id']) else None,
                         }
                         for idx, o in enumerate(outlets_list)
                     ]
@@ -2854,8 +2930,26 @@ async def upload_targets(
         # Parse rows (skip header)
         rows_processed = 0
         errors = []
+        warnings = []
 
         async with pool.acquire() as conn:
+            # Collect all staff IDs from the Excel for validation
+            all_excel_staff_ids = []
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if row[0]:
+                    all_excel_staff_ids.append(str(row[0]).strip())
+
+            # Validate staff IDs against staff_list_master
+            if all_excel_staff_ids:
+                valid_rows = await conn.fetch("""
+                    SELECT staff_id FROM kpi.staff_list_master WHERE staff_id = ANY($1)
+                """, all_excel_staff_ids)
+                valid_set = {r['staff_id'] for r in valid_rows}
+
+                for sid in all_excel_staff_ids:
+                    if sid not in valid_set:
+                        warnings.append(f"Staff ID {sid} not found in system - target will be uploaded but may not match any staff")
+
             for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
                 if not row[0]:  # Skip empty rows
                     continue
@@ -2902,7 +2996,8 @@ async def upload_targets(
         return {
             "success": True,
             "rows_processed": rows_processed,
-            "errors": errors if errors else None
+            "errors": errors if errors else None,
+            "warnings": warnings if warnings else None
         }
 
     except Exception as e:
