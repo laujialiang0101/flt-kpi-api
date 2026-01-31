@@ -970,6 +970,13 @@ async def get_my_dashboard(
 
             outlet_bms = safe_float(outlet_bms_hist) + safe_float(outlet_bms_today)
 
+            # Calculate BMS tier incentive
+            bms_incentive = 0
+            for tier in BMS_TIERS:
+                if outlet_bms >= tier['outlet_min'] and bms_hs >= tier['staff_min']:
+                    bms_incentive = tier['incentive']
+                    break
+
             # Get daily breakdown from MV (historical) + today_sales_cache
             # MV has data up to yesterday, cache has today
             daily = await conn.fetch("""
@@ -1024,7 +1031,9 @@ async def get_my_dashboard(
                         "bms_hs": round(bms_hs, 2),
                         "outlet_bms_hs": round(outlet_bms, 2),
                         "commission": round(commission, 2),
-                        "today_commission": round(today_commission, 2)
+                        "today_commission": round(today_commission, 2),
+                        "bms_incentive": bms_incentive,
+                        "total_commission": round(commission + bms_incentive, 2)
                     },
                     "rankings": {
                         "outlet_rank": rankings['outlet_rank_sales'] if rankings else None,
@@ -1902,14 +1911,25 @@ async def get_team_overview(
             staff = sorted(staff_data.values(), key=lambda x: x['total_sales'], reverse=True)
 
         # Calculate BMS tier incentive per staff
-        # First, compute per-outlet BMS totals
-        outlet_bms = {}
-        for sid, s in staff_data.items():
-            oid = s.get('outlet_id', staff_group)
-            outlet_bms[oid] = outlet_bms.get(oid, 0) + bms_staff_data.get(sid, 0)
+        # Get per-outlet BMS totals from outlet-level data (includes ALL staff at each outlet)
+        if view_all:
+            # Need per-outlet BMS totals - query outlet-level MV
+            outlet_ids_for_bms = list({s.get('outlet_id') for s in staff_data.values() if s.get('outlet_id')})
+            outlet_bms = {}
+            if outlet_ids_for_bms:
+                bms_rows = await conn.fetch("""
+                    SELECT outlet_id, COALESCE(SUM(bms_hs_sales), 0) as bms_hs
+                    FROM analytics.mv_outlet_daily_kpi
+                    WHERE outlet_id = ANY($1) AND sale_date BETWEEN $2 AND $3
+                    GROUP BY outlet_id
+                """, outlet_ids_for_bms, start_date, end_date)
+                outlet_bms = {r['outlet_id']: float(r['bms_hs'] or 0) for r in bms_rows}
+        else:
+            # Single outlet - use the summary which already has the full outlet BMS total
+            outlet_bms = {outlet_id: summary.get('bms_hs', 0)}
 
         for sid, s in staff_data.items():
-            oid = s.get('outlet_id', staff_group)
+            oid = s.get('outlet_id', outlet_id or staff_group)
             outlet_total_bms = outlet_bms.get(oid, 0)
             staff_bms = bms_staff_data.get(sid, 0)
             bms_incentive = 0
