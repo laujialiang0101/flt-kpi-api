@@ -1924,11 +1924,22 @@ async def get_team_overview(
         staff_ids = [s['staff_id'] for s in staff_data.values()]
         if staff_ids:
             target_rows = await conn.fetch("""
-                SELECT salesman_id, total_sales_target
+                SELECT salesman_id, total_sales_target, house_brand_target,
+                       focused_item_1_target, focused_item_2_target, focused_item_3_target,
+                       pwp_target, stock_clearance_target, transaction_count_target
                 FROM "KPITargets"
                 WHERE year_month = $1 AND salesman_id = ANY($2)
             """, int(month_str), staff_ids)
-            target_map = {r['salesman_id']: float(r['total_sales_target'] or 0) for r in target_rows}
+            target_map = {r['salesman_id']: {
+                'total_sales': float(r['total_sales_target'] or 0),
+                'house_brand': float(r['house_brand_target'] or 0),
+                'focused_1': float(r['focused_item_1_target'] or 0),
+                'focused_2': float(r['focused_item_2_target'] or 0),
+                'focused_3': float(r['focused_item_3_target'] or 0),
+                'pwp': float(r['pwp_target'] or 0),
+                'clearance': float(r['stock_clearance_target'] or 0),
+                'transactions': int(r['transaction_count_target'] or 0),
+            } for r in target_rows}
         else:
             target_map = {}
 
@@ -1974,8 +1985,7 @@ async def get_team_overview(
                         "commission": round(float(row.get('commission', 0) or 0), 2),
                         "bms_incentive": round(float(row.get('bms_incentive', 0)), 2),
                         "total_commission": round(float(row.get('commission', 0) or 0) + float(row.get('bms_incentive', 0)), 2),
-                        "target_total_sales": target_map.get(row['staff_id'], 0),
-                        "target_progress": round(float(row['total_sales'] or 0) / target_map[row['staff_id']] * 100, 1) if target_map.get(row['staff_id']) else None,
+                        "targets": target_map.get(row['staff_id']),
                     }
                     for row in staff
                 ]
@@ -2492,11 +2502,24 @@ async def get_outlet_performance(
             outlet_ids_list = list(outlet_data.keys())
             if outlet_ids_list:
                 outlet_target_rows = await conn.fetch("""
-                    SELECT outlet_id, total_sales_target
+                    SELECT outlet_id, total_sales_target, gross_profit_target,
+                           house_brand_target, focused_item_1_target, focused_item_2_target,
+                           focused_item_3_target, pwp_target, stock_clearance_target,
+                           transaction_count_target
                     FROM "OutletTargets"
                     WHERE year_month = $1 AND outlet_id = ANY($2)
                 """, int(month_str), outlet_ids_list)
-                outlet_target_map = {r['outlet_id']: float(r['total_sales_target'] or 0) for r in outlet_target_rows}
+                outlet_target_map = {r['outlet_id']: {
+                    'total_sales': float(r['total_sales_target'] or 0),
+                    'gross_profit': float(r['gross_profit_target'] or 0),
+                    'house_brand': float(r['house_brand_target'] or 0),
+                    'focused_1': float(r['focused_item_1_target'] or 0),
+                    'focused_2': float(r['focused_item_2_target'] or 0),
+                    'focused_3': float(r['focused_item_3_target'] or 0),
+                    'pwp': float(r['pwp_target'] or 0),
+                    'clearance': float(r['stock_clearance_target'] or 0),
+                    'transactions': int(r['transaction_count_target'] or 0),
+                } for r in outlet_target_rows}
             else:
                 outlet_target_map = {}
 
@@ -2550,8 +2573,7 @@ async def get_outlet_performance(
                             "bms_hs": round(o.get('bms_hs', 0), 2),
                             "transactions": o['transactions'],
                             "rank": idx + 1,
-                            "target_total_sales": outlet_target_map.get(o['outlet_id'], 0),
-                            "target_progress": round(o['total_sales'] / outlet_target_map[o['outlet_id']] * 100, 1) if outlet_target_map.get(o['outlet_id']) else None,
+                            "targets": outlet_target_map.get(o['outlet_id']),
                         }
                         for idx, o in enumerate(outlets_list)
                     ]
