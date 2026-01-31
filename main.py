@@ -1912,20 +1912,33 @@ async def get_team_overview(
 
         # Calculate BMS tier incentive per staff
         # Get per-outlet BMS totals from outlet-level data (includes ALL staff at each outlet)
+        # HYBRID: MV for historical (excl. today) + today_outlet_cache for today
         if view_all:
-            # Need per-outlet BMS totals - query outlet-level MV
             outlet_ids_for_bms = list({s.get('outlet_id') for s in staff_data.values() if s.get('outlet_id')})
             outlet_bms = {}
             if outlet_ids_for_bms:
-                bms_rows = await conn.fetch("""
-                    SELECT outlet_id, COALESCE(SUM(bms_hs_sales), 0) as bms_hs
-                    FROM analytics.mv_outlet_daily_kpi
-                    WHERE outlet_id = ANY($1) AND sale_date BETWEEN $2 AND $3
-                    GROUP BY outlet_id
-                """, outlet_ids_for_bms, start_date, end_date)
-                outlet_bms = {r['outlet_id']: float(r['bms_hs'] or 0) for r in bms_rows}
+                # Historical from MV (excluding today)
+                if has_historical:
+                    bms_rows = await conn.fetch("""
+                        SELECT outlet_id, COALESCE(SUM(bms_hs_sales), 0) as bms_hs
+                        FROM analytics.mv_outlet_daily_kpi
+                        WHERE outlet_id = ANY($1) AND sale_date BETWEEN $2 AND $3
+                        GROUP BY outlet_id
+                    """, outlet_ids_for_bms, start_date, hist_end)
+                    outlet_bms = {r['outlet_id']: float(r['bms_hs'] or 0) for r in bms_rows}
+                # Today from cache
+                if has_today:
+                    today_bms_rows = await conn.fetch("""
+                        SELECT outlet_id, COALESCE(SUM(bms_hs_sales), 0) as bms_hs
+                        FROM kpi.today_outlet_cache
+                        WHERE outlet_id = ANY($1) AND sale_date = CURRENT_DATE
+                        GROUP BY outlet_id
+                    """, outlet_ids_for_bms)
+                    for r in today_bms_rows:
+                        oid = r['outlet_id']
+                        outlet_bms[oid] = outlet_bms.get(oid, 0) + float(r['bms_hs'] or 0)
         else:
-            # Single outlet - use the summary which already has the full outlet BMS total
+            # Single outlet - summary is already hybrid (MV + today from base tables)
             outlet_bms = {outlet_id: summary.get('bms_hs', 0)}
 
         for sid, s in staff_data.items():
