@@ -3061,10 +3061,17 @@ async def upload_targets(
 
         async with pool.acquire() as conn:
             # Collect all staff IDs from the Excel for validation
+            def clean_id(val):
+                """Convert Excel cell to clean string ID (handles float like 990308115328.0)."""
+                s = str(val).strip()
+                if s.endswith('.0'):
+                    s = s[:-2]
+                return s
+
             all_excel_staff_ids = []
             for row in ws.iter_rows(min_row=2, values_only=True):
                 if row[0]:
-                    all_excel_staff_ids.append(str(row[0]).strip())
+                    all_excel_staff_ids.append(clean_id(row[0]))
 
             # Validate staff IDs against staff_list_master
             if all_excel_staff_ids:
@@ -3082,8 +3089,8 @@ async def upload_targets(
                     continue
 
                 try:
-                    staff_id = str(row[0]).strip()
-                    year_month = int(row[1])
+                    staff_id = clean_id(row[0])
+                    year_month = int(float(row[1]))
                     total_sales = float(row[2] or 0)
                     house_brand = float(row[3] or 0)
                     focused_1 = float(row[4] or 0)
@@ -4620,8 +4627,10 @@ async def upload_outlet_targets(
 
                 try:
                     outlet_id = str(row[0]).strip()
+                    if outlet_id.endswith('.0'):
+                        outlet_id = outlet_id[:-2]
                     # Skip outlet_name column (index 1)
-                    year_month = int(row[2] or 0)
+                    year_month = int(float(row[2] or 0))
                     total_sales = float(row[3] or 0)
                     gross_profit = float(row[4] or 0)
                     house_brand = float(row[5] or 0)
