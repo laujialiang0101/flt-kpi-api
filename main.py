@@ -3652,32 +3652,32 @@ async def send_test_notification(
 
 # Gen Z friendly motivational messages - short, affirming, with emojis
 MORNING_MOTIVATIONS = [
-    "Let's crush it today! 💪",
-    "You've got this bestie! ✨",
-    "Time to slay! 🔥",
-    "Main character energy today! 🌟",
-    "Your goals are loading... 📈",
-    "New day, new wins! 🎯",
-    "Serving excellence today! 💅",
-    "Era of success starts now! 🚀",
+    "Small wins build big results. Let's go! 💪",
+    "Every sale counts. Your progress is real! ✨",
+    "Yesterday's earners showed up. Will you? 🔥",
+    "The top earners started just like this. Your move! 🌟",
+    "Progress compounds. One sale at a time! 📈",
+    "New day, new commission opportunities! 🎯",
+    "Last month's top performers started mornings strong! 💅",
+    "Consistency beats intensity. Show up today! 🚀",
 ]
 
 EVENING_MOTIVATIONS_GOOD = [
-    "You ate today! 🔥",
-    "Slayed! Tomorrow we go again! 💅",
-    "W performance! Keep vibing! ✨",
-    "That's the energy we need! 🌟",
-    "Legend status achieved! 🏆",
-    "No cap, you killed it! 💪",
+    "Solid day! Consistency is the real flex 🔥",
+    "Above-average day! That compounds over the month 💅",
+    "Strong performance! Your MTD is growing ✨",
+    "That's what progress looks like! 🌟",
+    "Another day of earning. Keep building! 🏆",
+    "Your effort shows in the numbers! 💪",
 ]
 
 EVENING_MOTIVATIONS_NEEDS_PUSH = [
-    "Tomorrow is your redemption arc! 💪",
-    "Rest up, comeback loading... 🔄",
-    "We move! Try again tomorrow! ✨",
-    "It's giving 'work in progress' 📈",
-    "Not the end, just a plot twist! 🎬",
-    "Glow up starts tomorrow! 🌅",
+    "Tomorrow is a fresh counter. New opportunities incoming! 💪",
+    "The best performers have off days too. Reset and go! 🔄",
+    "One day doesn't define the month. You've got this! ✨",
+    "Progress isn't always linear. Keep showing up! 📈",
+    "Every working day is another chance to earn! 🎬",
+    "Rest up, the commission opportunities reset tomorrow! 🌅",
 ]
 
 @app.post("/api/v1/push/morning-briefing")
@@ -3739,6 +3739,14 @@ async def send_morning_briefing(
 
             motivation = random.choice(MORNING_MOTIVATIONS)
 
+            # Get yesterday's earner count for social proof
+            yesterday = today - timedelta(days=1)
+            yesterday_earners = await conn.fetchval("""
+                SELECT COUNT(DISTINCT staff_id) FROM analytics.mv_staff_daily_commission
+                WHERE sale_date = $1 AND commission > 0
+            """, yesterday)
+            social_proof = f"{yesterday_earners} staff earned commission yesterday." if yesterday_earners else ""
+
             for staff in staff_data:
                 mtd = float(staff['mtd_total'] or 0)
                 target = float(staff['target_total'] or 0)
@@ -3749,14 +3757,14 @@ async def send_morning_briefing(
                     progress_pct = (mtd / target) * 100
 
                     if gap <= 0:
-                        title = "🎯 You're ahead of target!"
-                        msg = f"MTD: RM{mtd:,.0f} | Already hit RM{target:,.0f}! {motivation}"
+                        title = "🎯 Target already hit!"
+                        msg = f"MTD: RM{mtd:,.0f}/{target:,.0f} ({progress_pct:.0f}%)! Every sale now is bonus. {motivation}"
                     else:
                         title = "☀️ Good morning!"
-                        msg = f"Gap: RM{gap:,.0f} | Need RM{daily_needed:,.0f}/day | {days_remaining} days left. {motivation}"
+                        msg = f"Gap: RM{gap:,.0f} | RM{daily_needed:,.0f}/day for {days_remaining} days. {social_proof} {motivation}"
                 else:
                     title = "☀️ Rise and grind!"
-                    msg = f"MTD: RM{mtd:,.0f} | No target set yet. {motivation}"
+                    msg = f"MTD: RM{mtd:,.0f}. {social_proof} {motivation}"
 
                 try:
                     await send_push_to_staff(
@@ -4836,12 +4844,20 @@ async def get_outlet_targets(
 # - Streak and badge unlocks
 
 # Gen Z Achievement Messages - Short, punchy, emoji-rich
+# Enhanced with progress context via {amount}, {today_total}, {next_milestone}
 COMMISSION_MESSAGES = [
-    "Ka-ching! 💸 You just earned RM{amount:.2f}!",
-    "Money moves! 💰 RM{amount:.2f} commission unlocked!",
-    "Bag secured! 🎒 +RM{amount:.2f} to your pocket!",
-    "Cha-ching! 🤑 RM{amount:.2f} earned!",
-    "Get that bread! 🍞 +RM{amount:.2f}!",
+    "Ka-ching! 💸 +RM{amount:.2f} → Today: RM{today_total:.2f}",
+    "Money moves! 💰 +RM{amount:.2f} → RM{today_total:.2f} so far!",
+    "Bag secured! 🎒 +RM{amount:.2f} → Today's total: RM{today_total:.2f}",
+    "Cha-ching! 🤑 +RM{amount:.2f} → Running total: RM{today_total:.2f}",
+    "Get that bread! 🍞 +RM{amount:.2f} → RM{today_total:.2f} today!",
+]
+
+# Next milestone teaser messages - appended when close to next threshold
+NEXT_MILESTONE_MESSAGES = [
+    "Just RM{gap:.2f} to {next_name}! 🎯",
+    "RM{gap:.2f} away from {next_name}! Almost there! 🔥",
+    "So close to {next_name}! Only RM{gap:.2f} more! ⚡",
 ]
 
 RANK_UP_MESSAGES = [
@@ -4915,8 +4931,49 @@ async def notify_commission_earned(
     if event.commission_earned <= 0:
         return {"success": False, "reason": "No commission to report"}
 
-    # Generate engaging message
-    message = random.choice(COMMISSION_MESSAGES).format(amount=event.commission_earned)
+    today = get_myt_date()
+    today_total = event.commission_earned  # fallback
+    next_milestone_text = ""
+    social_proof = ""
+
+    # Query context: today's running total, social proof, next milestone
+    try:
+        async with pool.acquire() as conn:
+            # Get today's cumulative commission for this staff
+            row = await conn.fetchrow("""
+                SELECT COALESCE(SUM(commission), 0) as total
+                FROM analytics.mv_staff_daily_commission
+                WHERE staff_id = $1 AND sale_date = $2
+            """, event.staff_id, today)
+            if row:
+                today_total = float(row['total'])
+
+            # Social proof: how many staff earned commission today
+            earner_count = await conn.fetchval("""
+                SELECT COUNT(DISTINCT staff_id) FROM analytics.mv_staff_daily_commission
+                WHERE sale_date = $1 AND commission > 0
+            """, today)
+            if earner_count and earner_count > 1:
+                social_proof = f"\n{earner_count} staff earning today - you're one of them!"
+
+            # Find next milestone they haven't reached yet
+            for threshold, name, _ in COMMISSION_THRESHOLDS:
+                if today_total < threshold:
+                    gap = threshold - today_total
+                    if gap <= threshold * 0.6:  # Only show if within 60% reach
+                        next_milestone_text = "\n" + random.choice(NEXT_MILESTONE_MESSAGES).format(
+                            gap=gap, next_name=name
+                        )
+                    break
+    except Exception as e:
+        print(f"Commission context query failed (non-fatal): {e}")
+
+    # Generate engaging message with running total
+    message = random.choice(COMMISSION_MESSAGES).format(
+        amount=event.commission_earned,
+        today_total=today_total,
+        next_milestone=next_milestone_text
+    )
 
     # Add product context
     product_short = (event.product_name or "item")[:25]
@@ -4932,15 +4989,18 @@ async def notify_commission_earned(
     }
     title = title_map.get(event.sale_category, "💰 Commission Earned!")
 
+    full_message = f"{message}\n{detail}{next_milestone_text}{social_proof}"
+
     # Save to notifications table
     try:
         async with pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO kpi.notifications (staff_id, title, message, type, data)
                 VALUES ($1, $2, $3, 'commission', $4)
-            """, event.staff_id, title, f"{message}\n{detail}",
+            """, event.staff_id, title, full_message,
             json.dumps({
                 "commission": event.commission_earned,
+                "today_total": today_total,
                 "sale_amount": event.sale_amount,
                 "product": event.product_name,
                 "category": event.sale_category
@@ -4952,10 +5012,11 @@ async def notify_commission_earned(
     result = await send_push_to_staff(
         staff_id=event.staff_id,
         title=title,
-        message=f"{message}\n{detail}",
+        message=full_message,
         data={
             "type": "commission",
             "commission": event.commission_earned,
+            "today_total": today_total,
             "category": event.sale_category
         }
     )
@@ -5033,17 +5094,30 @@ async def check_and_notify_commission_changes(
                     """, staff_id)
                     staff_name = staff_row['staff_name'] if staff_row else staff_id
 
-                    # Generate notification
-                    message = random.choice(COMMISSION_MESSAGES).format(amount=delta)
+                    # Generate notification with running total context
+                    message = random.choice(COMMISSION_MESSAGES).format(
+                        amount=delta, today_total=current, next_milestone=""
+                    )
                     title = "💰 Commission Earned!"
 
-                    # Add context
+                    # Add context based on delta size
                     if delta >= 10:
                         title = "🔥 Big Commission Alert!"
                     elif delta >= 5:
                         title = "⭐ Nice Commission!"
 
-                    detail = f"Today's total: RM{current:.2f} (+RM{delta:.2f})"
+                    # Find next milestone and add teaser
+                    next_milestone_text = ""
+                    for threshold, name, _ in COMMISSION_THRESHOLDS:
+                        if current < threshold:
+                            gap = threshold - current
+                            if gap <= threshold * 0.6:
+                                next_milestone_text = "\n" + random.choice(NEXT_MILESTONE_MESSAGES).format(
+                                    gap=gap, next_name=name
+                                )
+                            break
+
+                    detail = f"Today's total: RM{current:.2f} (+RM{delta:.2f}){next_milestone_text}"
 
                     # Save to notifications table
                     try:
@@ -5495,15 +5569,16 @@ async def check_and_notify_streaks(
 
     Schedule: Daily at 9pm MYT (part of daily milestones)
 
-    Tracks:
-    1. Weekly consistency: Days on target this week (accounts for 1-2 days off)
-    2. Weekly streak: Consecutive weeks meeting weekly target (MTD pace)
+    East Coast Malaysia (Terengganu/Kelantan): Sun-Thu work week, Fri-Sat weekend.
+    Runs on Thursday (last working day) and Friday (catch-up).
 
-    Staff typically work 5-6 days/week, so we celebrate:
-    - 4/5 days on target: "Great week! 4 days on target!"
-    - 5/5 days on target: "Perfect week! All working days crushed!"
-    - 2-week streak: Consecutive weeks on pace
-    - 4-week streak: Monthly champion
+    Tracks:
+    1. Weekly consistency: Days with sales this week (lowered threshold for engagement)
+       - 3/5 days: "Solid Week!" (showed up consistently)
+       - 4/5 days: "Great Week!" (strong attendance)
+       - 5/5 days: "Perfect Week!" (every working day)
+    2. Consecutive earning streak: How many consecutive days they earned commission
+    3. Multi-week streaks: Consecutive weeks meeting weekly consistency
     """
     expected_key = os.getenv('PUSH_API_KEY', 'flt-push-2024')
     if api_key != expected_key:
@@ -5516,32 +5591,32 @@ async def check_and_notify_streaks(
     year_month = int(today.strftime('%Y%m'))
     notified = []
 
-    # Only run on Fridays or Saturdays (East Coast Malaysia weekend)
-    # Terengganu & Kelantan: Fri-Sat weekend, Sun-Thu working days
-    if today.weekday() not in [4, 5]:  # Friday = 4, Saturday = 5
+    # Run on Thursday (3) and Friday (4) - end of East Coast MY work week
+    if today.weekday() not in [3, 4]:
         return {
             "success": True,
-            "message": "Streak check only runs on weekends (Fri-Sat for East Coast MY)",
+            "message": "Streak check runs on Thu-Fri (end of East Coast MY work week)",
             "notified_count": 0
         }
 
     try:
         async with pool.acquire() as conn:
-            # Create streak tracking table
+            # Create/ensure streak tracking tables
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS kpi.weekly_streak_notifications (
                     staff_id TEXT,
                     week_start DATE,
+                    days_worked INTEGER DEFAULT 0,
                     notified_at TIMESTAMP DEFAULT NOW(),
                     PRIMARY KEY (staff_id, week_start)
                 )
             """)
 
             # Get week boundaries (Sun-Thu for East Coast Malaysia)
-            # Sunday = 6, so if today is Fri(4) or Sat(5), week started last Sunday
-            days_since_sunday = (today.weekday() + 1) % 7  # Sunday = 0 in this calc
-            week_start = today - timedelta(days=days_since_sunday)  # Last Sunday
-            week_end = week_start + timedelta(days=4)  # Thursday (end of work week)
+            # If today is Thu(3): week started last Sunday; If Fri(4): same
+            days_since_sunday = (today.weekday() + 1) % 7
+            week_start = today - timedelta(days=days_since_sunday)
+            week_end = week_start + timedelta(days=4)  # Thursday
 
             # Get subscribed staff with targets
             subscribed = await conn.fetch("""
@@ -5567,13 +5642,7 @@ async def check_and_notify_streaks(
                 if staff_id in already_notified:
                     continue
 
-                if monthly_target <= 0:
-                    continue
-
-                # Calculate daily target (assuming ~26 working days)
-                daily_target = monthly_target / 26
-
-                # Get this week's daily performance
+                # Get this week's daily performance (sales > 0 = showed up and sold)
                 week_data = await conn.fetch("""
                     SELECT sale_date, SUM(total_sales) as daily_total
                     FROM analytics.mv_staff_daily_kpi
@@ -5581,60 +5650,107 @@ async def check_and_notify_streaks(
                       AND sale_date >= $2
                       AND sale_date <= $3
                     GROUP BY sale_date
+                    HAVING SUM(total_sales) > 0
                 """, staff_id, week_start, week_end)
 
                 working_days = len(week_data)
-                days_on_target = sum(1 for d in week_data if float(d['daily_total'] or 0) >= daily_target)
 
-                # Only celebrate if they worked at least 3 days this week
-                if working_days >= 3:
-                    if working_days == days_on_target and days_on_target >= 4:
-                        # Perfect week!
-                        title = "🌟 Perfect Week!"
-                        message = f"All {working_days} working days on target! Absolute beast mode!"
-                        notif_type = "perfect_week"
-                    elif days_on_target >= 4:
-                        # Great week
-                        title = "✨ Great Week!"
-                        message = f"{days_on_target}/{working_days} days on target! Solid consistency!"
-                        notif_type = "great_week"
+                # Calculate daily target for on-target count
+                daily_target = monthly_target / 26 if monthly_target > 0 else 0
+                days_on_target = 0
+                if daily_target > 0:
+                    days_on_target = sum(1 for d in week_data if float(d['daily_total'] or 0) >= daily_target)
+
+                # Determine notification tier (lowered thresholds for engagement)
+                title = None
+                message = None
+                notif_type = None
+
+                if working_days >= 5:
+                    title = "🌟 Perfect Week!"
+                    message = f"All 5 working days you made sales! That's elite consistency!"
+                    notif_type = "perfect_week"
+                elif working_days >= 4:
+                    title = "✨ Great Week!"
+                    message = f"{working_days}/5 days with sales this week! Strong showing!"
+                    notif_type = "great_week"
+                elif working_days >= 3:
+                    title = "👍 Solid Week!"
+                    message = f"{working_days}/5 days with sales! Consistency builds success!"
+                    notif_type = "solid_week"
+                else:
+                    continue  # Less than 3 days - no notification
+
+                # Check multi-week streak: how many consecutive weeks they had 3+ working days
+                prev_weeks = await conn.fetch("""
+                    SELECT week_start, days_worked FROM kpi.weekly_streak_notifications
+                    WHERE staff_id = $1 AND days_worked >= 3
+                    ORDER BY week_start DESC
+                    LIMIT 8
+                """, staff_id)
+
+                consecutive_weeks = 0
+                check_week = week_start - timedelta(days=7)
+                for pw in prev_weeks:
+                    if pw['week_start'] == check_week:
+                        consecutive_weeks += 1
+                        check_week -= timedelta(days=7)
                     else:
-                        # Not enough days on target - skip notification
-                        continue
+                        break
 
-                    try:
-                        await send_push_to_staff(
-                            staff_id=staff_id,
-                            title=title,
-                            message=message,
-                            data={"type": notif_type, "days_worked": working_days, "days_on_target": days_on_target}
-                        )
+                # Add streak context to message
+                if consecutive_weeks >= 4:
+                    message += f"\n🏆 {consecutive_weeks + 1}-WEEK STREAK! Monthly champion consistency!"
+                elif consecutive_weeks >= 2:
+                    message += f"\n🔥 {consecutive_weeks + 1}-week streak! You're building a habit!"
+                elif consecutive_weeks >= 1:
+                    message += f"\n📈 2 weeks in a row! Keep the streak alive!"
 
-                        # Save to notifications
-                        await conn.execute("""
-                            INSERT INTO kpi.notifications (staff_id, title, message, type, data)
-                            VALUES ($1, $2, $3, 'weekly_consistency', $4)
-                        """, staff_id, title, message, json.dumps({
+                # Add target context if available
+                if daily_target > 0 and days_on_target > 0:
+                    message += f"\n{days_on_target}/{working_days} days hit daily target (RM{daily_target:,.0f}/day)"
+
+                try:
+                    await send_push_to_staff(
+                        staff_id=staff_id,
+                        title=title,
+                        message=message,
+                        data={
+                            "type": notif_type,
                             "days_worked": working_days,
                             "days_on_target": days_on_target,
-                            "week_start": str(week_start)
-                        }))
+                            "consecutive_weeks": consecutive_weeks + 1
+                        }
+                    )
 
-                        # Mark as notified
-                        await conn.execute("""
-                            INSERT INTO kpi.weekly_streak_notifications (staff_id, week_start)
-                            VALUES ($1, $2) ON CONFLICT DO NOTHING
-                        """, staff_id, week_start)
+                    # Save to notifications
+                    await conn.execute("""
+                        INSERT INTO kpi.notifications (staff_id, title, message, type, data)
+                        VALUES ($1, $2, $3, 'weekly_consistency', $4)
+                    """, staff_id, title, message, json.dumps({
+                        "days_worked": working_days,
+                        "days_on_target": days_on_target,
+                        "consecutive_weeks": consecutive_weeks + 1,
+                        "week_start": str(week_start)
+                    }))
 
-                        notified.append({
-                            "staff_id": staff_id,
-                            "staff_name": staff_name,
-                            "days_worked": working_days,
-                            "days_on_target": days_on_target,
-                            "type": notif_type
-                        })
-                    except Exception as e:
-                        print(f"Failed to notify weekly consistency for {staff_id}: {e}")
+                    # Mark as notified with days_worked for multi-week tracking
+                    await conn.execute("""
+                        INSERT INTO kpi.weekly_streak_notifications (staff_id, week_start, days_worked)
+                        VALUES ($1, $2, $3) ON CONFLICT (staff_id, week_start) DO UPDATE
+                        SET days_worked = $3, notified_at = NOW()
+                    """, staff_id, week_start, working_days)
+
+                    notified.append({
+                        "staff_id": staff_id,
+                        "staff_name": staff_name,
+                        "days_worked": working_days,
+                        "days_on_target": days_on_target,
+                        "consecutive_weeks": consecutive_weeks + 1,
+                        "type": notif_type
+                    })
+                except Exception as e:
+                    print(f"Failed to notify weekly consistency for {staff_id}: {e}")
 
         return {
             "success": True,
@@ -5762,42 +5878,42 @@ async def get_staff_achievements(staff_id: str):
 
 # Midday check-in messages (12pm) - encouraging, motivating to push harder
 MIDDAY_MESSAGES_AHEAD = [
-    "Killing it! 🔥 Keep this energy going!",
-    "You're on fire today! 💪 Maintain the momentum!",
-    "Slaying the daily target! ✨ Don't stop now!",
-    "Main character energy! 🌟 Afternoon = more wins!",
+    "Ahead of pace! 🔥 Afternoon is bonus territory!",
+    "Strong morning! 💪 Every extra sale builds your lead!",
+    "Above target pace! ✨ This is how top earners do it!",
+    "Great first half! 🌟 Keep the momentum rolling!",
 ]
 
 MIDDAY_MESSAGES_BEHIND = [
-    "Afternoon comeback loading... 💪",
-    "Second half is YOUR half! 🏃",
-    "Plot twist incoming! 📈",
-    "Time to turn it around! ⚡",
+    "Afternoon is when comeback stories are written! 💪",
+    "Most daily sales happen after lunch. Your time is now! 🏃",
+    "Half the day left, full commission potential! 📈",
+    "The gap is closeable. One sale at a time! ⚡",
 ]
 
 MIDDAY_MESSAGES_ON_TRACK = [
-    "On track! Solid morning! 👍",
-    "Looking good! Keep the pace! 🎯",
-    "Nice steady progress! 📊",
+    "On pace! Solid foundation. Build on it! 👍",
+    "Right where you need to be. Keep going! 🎯",
+    "Steady progress wins the month! 📊",
 ]
 
 # End of day messages (6pm) - celebrating or encouraging for tomorrow
 EOD_MESSAGES_CRUSHED = [
-    "DAILY TARGET CRUSHED! 🏆 Legend status!",
-    "You did THAT today! 💅 Rest well, champion!",
-    "Target? Destroyed! 💥 Tomorrow we go again!",
+    "DAILY TARGET HIT! 🏆 This goes straight to your monthly total!",
+    "Target achieved! 💅 Days like this build your month!",
+    "Above target! 💥 Your consistency is your superpower!",
 ]
 
 EOD_MESSAGES_CLOSE = [
-    "So close! 🎯 A few more sales and you're there!",
-    "Almost at target! Final push! 💪",
-    "You've got this! Just a bit more! ⚡",
+    "So close to target! 🎯 Late customers could tip you over!",
+    "Almost there! 💪 This kind of effort compounds!",
+    "Near-miss today builds tomorrow's momentum! ⚡",
 ]
 
 EOD_MESSAGES_BEHIND = [
-    "Tomorrow is a new day! 🌅 Fresh start incoming!",
-    "Every day is a chance to level up! 📈",
-    "Rest up, comeback arc starts tomorrow! 💪",
+    "Tomorrow resets the counter. Fresh opportunities! 🌅",
+    "Every working day is a new chance to earn! 📈",
+    "The month isn't over. Keep showing up! 💪",
 ]
 
 
@@ -5997,14 +6113,18 @@ async def run_daily_rank_and_milestone_check(
 # Instead of notifying every small commission increase, we notify at meaningful
 # thresholds to avoid spam while still providing dopamine hits.
 
-# Average commission ~RM400/month = ~RM15/day
-# Thresholds set to celebrate meaningful achievements
+# Data-driven thresholds from Jan 2026 analysis:
+# Median daily commission: RM9.69 | Mean: RM12.25 | P75: RM16.82 | P90: RM25.66
+# Designed using Locke & Latham goal-setting theory: 80%/50%/20% achievability tiers
+# Variable ratio reinforcement (Skinner) - frequent early wins, harder later tiers
 COMMISSION_THRESHOLDS = [
-    (10, "Nice Start!", "RM10+ commission today - keep it up!"),
-    (20, "Double Digits!", "RM20+ commission - you're rolling!"),
-    (30, "On a Roll!", "RM30+ commission - above average day!"),
-    (50, "Half Century!", "RM50+ commission - crushing it!"),
-    (100, "TRIPLE DIGITS!", "RM100+ commission - absolute legend!"),
+    (3,  "On the Board!",    "First RM3 earned! The journey of a thousand ringgit starts here 🚀"),
+    (7,  "Warming Up!",      "RM7+ today! You're building momentum 📈"),
+    (12, "Above Average!",   "RM12+ commission! You just beat the daily average 🔥"),
+    (18, "Hot Streak!",      "RM18+ today! Top 25% performance - keep pushing! 💪"),
+    (25, "ON FIRE!",         "RM25+ commission! Top 10% day - you're in rare company! ⚡"),
+    (35, "ELITE STATUS!",    "RM35+ today! Only 5% of days reach this level! 🏆"),
+    (50, "LEGENDARY DAY!",   "RM50+ COMMISSION! Absolutely elite - less than 1% hit this! 👑"),
 ]
 
 
@@ -6070,13 +6190,19 @@ async def check_commission_thresholds(
             """, today)
             notified_set = {(r['staff_id'], r['threshold']) for r in notified_thresholds}
 
+            # Count how many staff are earning today (social proof)
+            earner_count = await conn.fetchval("""
+                SELECT COUNT(DISTINCT staff_id) FROM analytics.mv_staff_daily_commission
+                WHERE sale_date = $1 AND commission > 0
+            """, today)
+
             # Check each staff against thresholds
             for staff in staff_commissions:
                 staff_id = staff['staff_id']
                 staff_name = staff['staff_name']
                 commission = float(staff['today_commission'] or 0)
 
-                # Check each threshold
+                # Check each threshold (highest uncrossed first for next-milestone preview)
                 for threshold, title_text, message_text in COMMISSION_THRESHOLDS:
                     # Skip if already notified this threshold today
                     if (staff_id, threshold) in notified_set:
@@ -6084,9 +6210,24 @@ async def check_commission_thresholds(
 
                     # Check if commission crossed this threshold
                     if commission >= threshold:
-                        # Send notification
+                        # Find next tier for teaser
+                        next_tier_text = ""
+                        for next_t, next_name, _ in COMMISSION_THRESHOLDS:
+                            if next_t > threshold and commission < next_t:
+                                gap = next_t - commission
+                                next_tier_text = f"\nNext: {next_name} (RM{gap:.2f} away)"
+                                break
+
+                        # Social proof line
+                        social_line = ""
+                        if earner_count and earner_count > 1:
+                            # Count how many hit this threshold
+                            above_count = sum(1 for s in staff_commissions if float(s['today_commission'] or 0) >= threshold)
+                            if above_count <= 5:
+                                social_line = f"\nOnly {above_count} staff reached this level today!"
+
                         full_title = f"💰 {title_text}"
-                        full_message = f"{message_text}\nTotal today: RM{commission:.2f}"
+                        full_message = f"{message_text}\nTotal today: RM{commission:.2f}{next_tier_text}{social_line}"
 
                         # Save to notifications table
                         try:
