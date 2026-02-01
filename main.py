@@ -125,6 +125,10 @@ class LoginResponse(BaseModel):
     needs_password_setup: bool = False
 
 
+class AdminResetPasswordRequest(BaseModel):
+    staff_code: str
+
+
 class TargetUploadRow(BaseModel):
     staff_id: str
     year_month: int  # YYYYMM format
@@ -142,71 +146,143 @@ class TargetUploadRow(BaseModel):
 # Role Mapping
 # ============================================================================
 
-ROLE_MAPPING = {
-    'ADMINISTRATORS': 'admin',
-    'COO': 'admin',  # Chief Operating Officer - full admin access
-    'CMO': 'admin',  # Chief Marketing Officer - full admin access
-    'SUPERVISOR': 'supervisor',
-    'PIC OUTLET': 'pic',
-    'PIC': 'pic',
-    'AREA_MANAGER': 'area_manager',
-    'AREA MANAGER': 'area_manager',
-    'OPERATIONS_MANAGER': 'operations_manager',
-    'OPERATIONS MANAGER': 'operations_manager',
-    'OOM': 'operations_manager',  # OOM = Outlet Operations Manager
-    'CASHIER': 'staff',
-    'PRICE CHECKER': 'staff',
+ROLE_PERMISSIONS = {
+    # C-Suite / Admin
+    'ADMINISTRATORS': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': True, 'can_upload_targets': True,
+        'can_view_all_staff': True, 'can_manage_roles': True,
+        'can_select_outlet': True,
+    },
+    'COO': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': True, 'can_upload_targets': True,
+        'can_view_all_staff': True, 'can_manage_roles': False,
+        'can_select_outlet': True,
+    },
+    'CMO': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': True, 'can_upload_targets': True,
+        'can_view_all_staff': True, 'can_manage_roles': False,
+        'can_select_outlet': True,
+    },
+    # Operations
+    'OPERATIONS MANAGER': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': True, 'can_upload_targets': True,
+        'can_view_all_staff': True, 'can_manage_roles': False,
+        'can_select_outlet': True,
+    },
+    'OOM': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': True, 'can_upload_targets': True,
+        'can_view_all_staff': True, 'can_manage_roles': False,
+        'can_select_outlet': True,
+    },
+    # Area Manager
+    'AREA MANAGER': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': True, 'can_upload_targets': False,
+        'can_view_all_staff': True, 'can_manage_roles': False,
+        'can_select_outlet': True,
+    },
+    # Supervisor
+    'SUPERVISOR': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': True, 'can_upload_targets': False,
+        'can_view_all_staff': True, 'can_manage_roles': False,
+        'can_select_outlet': False,
+    },
+    # PIC Outlet
+    'PIC OUTLET': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': False, 'can_upload_targets': False,
+        'can_view_all_staff': True, 'can_manage_roles': False,
+        'can_select_outlet': False,
+    },
+    'PIC': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': False, 'can_upload_targets': False,
+        'can_view_all_staff': True, 'can_manage_roles': False,
+        'can_select_outlet': False,
+    },
+    # HQ Departments
+    'ACCOUNT EXECUTIVE': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': False, 'can_upload_targets': False,
+        'can_view_all_staff': False, 'can_manage_roles': False,
+        'can_select_outlet': False,
+    },
+    'HR & FINANCE MANAGER': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': False, 'can_upload_targets': False,
+        'can_view_all_staff': True, 'can_manage_roles': False,
+        'can_select_outlet': True,
+    },
+    'HR EXECUTIVE': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': False, 'can_upload_targets': False,
+        'can_view_all_staff': False, 'can_manage_roles': False,
+        'can_select_outlet': False,
+    },
+    'MARKETING EXECUTIVE': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': False, 'can_upload_targets': False,
+        'can_view_all_staff': True, 'can_manage_roles': False,
+        'can_select_outlet': False,
+    },
+    'ONLINE EXECUTIVE': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': False, 'can_upload_targets': False,
+        'can_view_all_staff': True, 'can_manage_roles': False,
+        'can_select_outlet': False,
+    },
+    'PURCHASER': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': False, 'can_upload_targets': False,
+        'can_view_all_staff': True, 'can_manage_roles': False,
+        'can_select_outlet': False,
+    },
+    'WAREHOUSE MANAGER': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': False, 'can_upload_targets': False,
+        'can_view_all_staff': True, 'can_manage_roles': False,
+        'can_select_outlet': False,
+    },
+    # Logistics
+    'DRIVER': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': False, 'can_upload_targets': False,
+        'can_view_all_staff': False, 'can_manage_roles': False,
+        'can_select_outlet': False,
+    },
+    # Retail staff
+    'SALESPERSON': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': False, 'can_upload_targets': False,
+        'can_view_all_staff': False, 'can_manage_roles': False,
+        'can_select_outlet': False,
+    },
+    'CASHIER': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': False, 'can_upload_targets': False,
+        'can_view_all_staff': False, 'can_manage_roles': False,
+        'can_select_outlet': False,
+    },
+    'PRICE CHECKER': {
+        'can_view_own_kpi': True, 'can_view_leaderboard': True,
+        'can_submit_audit': False, 'can_upload_targets': False,
+        'can_view_all_staff': False, 'can_manage_roles': False,
+        'can_select_outlet': False,
+    },
 }
 
-ROLE_PERMISSIONS = {
-    'admin': {
-        'can_view_own_kpi': True,
-        'can_view_leaderboard': True,
-        'can_submit_audit': True,
-        'can_upload_targets': True,
-        'can_view_all_staff': True,
-        'can_manage_roles': True
-    },
-    'operations_manager': {
-        'can_view_own_kpi': True,
-        'can_view_leaderboard': True,
-        'can_submit_audit': True,
-        'can_upload_targets': True,
-        'can_view_all_staff': True,
-        'can_manage_roles': False
-    },
-    'area_manager': {
-        'can_view_own_kpi': True,
-        'can_view_leaderboard': True,
-        'can_submit_audit': True,
-        'can_upload_targets': False,
-        'can_view_all_staff': True,
-        'can_manage_roles': False
-    },
-    'supervisor': {
-        'can_view_own_kpi': True,
-        'can_view_leaderboard': True,
-        'can_submit_audit': True,
-        'can_upload_targets': False,
-        'can_view_all_staff': True,
-        'can_manage_roles': False
-    },
-    'pic': {
-        'can_view_own_kpi': True,
-        'can_view_leaderboard': True,
-        'can_submit_audit': False,
-        'can_upload_targets': False,
-        'can_view_all_staff': True,
-        'can_manage_roles': False
-    },
-    'staff': {
-        'can_view_own_kpi': True,
-        'can_view_leaderboard': True,
-        'can_submit_audit': False,
-        'can_upload_targets': False,
-        'can_view_all_staff': False,
-        'can_manage_roles': False
-    }
+# Default for any unmapped group
+DEFAULT_PERMISSIONS = {
+    'can_view_own_kpi': True, 'can_view_leaderboard': True,
+    'can_submit_audit': False, 'can_upload_targets': False,
+    'can_view_all_staff': False, 'can_manage_roles': False,
+    'can_select_outlet': False,
 }
 
 # In-memory session store (for production, use Redis)
@@ -337,6 +413,20 @@ async def lifespan(app: FastAPI):
             )
         """)
 
+        # Create sync_accuracy_snapshot table if not exists
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS kpi.sync_accuracy_snapshot (
+                table_name VARCHAR(50),
+                location VARCHAR(20),
+                check_date DATE,
+                mssql_count INT,
+                pg_count INT,
+                diff INT,
+                checked_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (table_name, location, check_date)
+            )
+        """)
+
         # Ensure OutletTargets has gross_profit_target column (migration for existing tables)
         await conn.execute("""
             DO $$
@@ -417,16 +507,8 @@ app.add_middleware(GZipMiddleware, minimum_size=500)
 # ============================================================================
 
 def get_role_from_group(user_group: str, is_supervisor: bool = False) -> str:
-    """Map AcPOSUserGroupID to application role.
-    
-    Role is determined SOLELY by AcPOSUserGroupID (POS user group).
-    The IsSupervisor checkbox is NOT used for role determination.
-    """
-    group = (user_group or '').upper().strip()
-    role = ROLE_MAPPING.get(group, 'staff')
-    # Note: is_supervisor parameter kept for backwards compatibility but NOT used
-    # Role should be determined by POS user group only
-    return role
+    """Return the raw POS user group as the role (uppercased)."""
+    return (user_group or '').upper().strip()
 
 
 async def get_current_user(token: str = Query(None, alias="token")):
@@ -593,24 +675,27 @@ async def login(request: LoginRequest):
                 for i, outlet_id in enumerate(allowed_outlets_ids)
             ]
 
-            # Determine outlet_id based on role
+            # Determine outlet_id based on role permissions
             role = staff['role']
-            if role in ['admin', 'operations_manager', 'area_manager']:
-                outlet_id = None  # Multi-outlet access
-                group_id = None
-            else:
-                outlet_id = staff['primary_outlet']
-                group_id = staff['primary_outlet']
+            role_perms = ROLE_PERMISSIONS.get(role, DEFAULT_PERMISSIONS)
 
-            # Build permissions from pre-computed columns
+            # Build permissions from pre-computed columns + API-computed can_select_outlet
             permissions = {
                 'can_view_own_kpi': staff['can_view_own_kpi'],
                 'can_view_leaderboard': staff['can_view_leaderboard'],
                 'can_submit_audit': staff['can_submit_audit'],
                 'can_upload_targets': staff['can_upload_targets'],
                 'can_view_all_staff': staff['can_view_all_staff'],
-                'can_manage_roles': staff['can_manage_roles']
+                'can_manage_roles': staff['can_manage_roles'],
+                'can_select_outlet': role_perms.get('can_select_outlet', False),
             }
+
+            if permissions['can_select_outlet']:
+                outlet_id = None  # Multi-outlet access
+                group_id = None
+            else:
+                outlet_id = staff['primary_outlet']
+                group_id = staff['primary_outlet']
 
             # Generate session token
             token = secrets.token_urlsafe(32)
@@ -716,24 +801,27 @@ async def refresh_session(token: str = Query(..., description="Session token")):
                 for i, outlet_id in enumerate(allowed_outlets_ids)
             ]
 
-            # Determine outlet_id based on role
+            # Determine outlet_id based on role permissions
             role = staff['role']
-            if role in ['admin', 'operations_manager', 'area_manager']:
-                outlet_id = None
-                group_id = None
-            else:
-                outlet_id = staff['primary_outlet']
-                group_id = staff['primary_outlet']
+            role_perms = ROLE_PERMISSIONS.get(role, DEFAULT_PERMISSIONS)
 
-            # Build permissions from pre-computed columns
+            # Build permissions from pre-computed columns + API-computed can_select_outlet
             permissions = {
                 'can_view_own_kpi': staff['can_view_own_kpi'],
                 'can_view_leaderboard': staff['can_view_leaderboard'],
                 'can_submit_audit': staff['can_submit_audit'],
                 'can_upload_targets': staff['can_upload_targets'],
                 'can_view_all_staff': staff['can_view_all_staff'],
-                'can_manage_roles': staff['can_manage_roles']
+                'can_manage_roles': staff['can_manage_roles'],
+                'can_select_outlet': role_perms.get('can_select_outlet', False),
             }
+
+            if permissions['can_select_outlet']:
+                outlet_id = None
+                group_id = None
+            else:
+                outlet_id = staff['primary_outlet']
+                group_id = staff['primary_outlet']
 
             # Update session with fresh data
             updated_user = {
@@ -2048,7 +2136,7 @@ async def get_team_overview(
                     {
                         "staff_id": row['staff_id'],
                         "staff_name": row['staff_name'] or "Unknown",
-                        "is_pic": role_map.get(row['staff_id'], {}).get('role') in ('pic', 'area_manager'),
+                        "is_pic": role_map.get(row['staff_id'], {}).get('role') in ('PIC OUTLET', 'PIC', 'AREA MANAGER'),
                         "outlet_id": row.get('outlet_id') if view_all else None,
                         "total_sales": float(row['total_sales'] or 0),
                         "house_brand": float(row['house_brand_sales'] or 0),
@@ -6466,6 +6554,257 @@ async def notify_first_time(conn, staff_id: str, staff_name: str, achievement_id
         "title": title,
         "push_sent": result.get("success", False)
     })
+
+
+# ============================================================================
+# Admin Endpoints
+# ============================================================================
+
+@app.get("/api/v1/admin/staff-search")
+async def admin_search_staff(
+    q: str = Query(..., description="Search query (staff code or name)"),
+    token: str = Query(..., description="Session token")
+):
+    """Search staff by code or name. Requires can_manage_roles permission."""
+    if token not in sessions:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    session = sessions[token]
+    if datetime.now() > session['expires_at']:
+        del sessions[token]
+        raise HTTPException(status_code=401, detail="Session expired")
+    if not session['user'].get('permissions', {}).get('can_manage_roles'):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT staff_id, staff_name, role, primary_outlet, primary_outlet_name, is_active
+                FROM kpi.staff_list_master
+                WHERE (UPPER(staff_id) LIKE UPPER($1) OR UPPER(staff_name) LIKE UPPER($1))
+                ORDER BY staff_name
+                LIMIT 20
+            """, f"%{q}%")
+            return {
+                "success": True,
+                "results": [
+                    {
+                        "staff_id": r['staff_id'],
+                        "staff_name": r['staff_name'],
+                        "role": r['role'],
+                        "outlet": r['primary_outlet'],
+                        "outlet_name": r['primary_outlet_name'],
+                        "is_active": r['is_active'],
+                    }
+                    for r in rows
+                ]
+            }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/v1/admin/reset-password")
+async def admin_reset_password(
+    request: AdminResetPasswordRequest,
+    token: str = Query(..., description="Session token")
+):
+    """Reset a staff member's KPI password. Deletes their kpi_user_auth row
+    so they get the first-time password setup flow on next login.
+    Requires can_manage_roles permission."""
+    if token not in sessions:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    session = sessions[token]
+    if datetime.now() > session['expires_at']:
+        del sessions[token]
+        raise HTTPException(status_code=401, detail="Session expired")
+    if not session['user'].get('permissions', {}).get('can_manage_roles'):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    try:
+        async with pool.acquire() as conn:
+            # Verify staff exists
+            staff = await conn.fetchrow("""
+                SELECT staff_id, staff_name FROM kpi.staff_list_master
+                WHERE UPPER(staff_id) = UPPER($1)
+            """, request.staff_code)
+
+            if not staff:
+                return {"success": False, "error": "Staff not found in staff_list_master"}
+
+            # Delete password record
+            result = await conn.execute("""
+                DELETE FROM kpi_user_auth WHERE UPPER(code) = UPPER($1)
+            """, request.staff_code)
+
+            deleted = result.split()[-1]  # e.g. "DELETE 1" -> "1"
+
+            return {
+                "success": True,
+                "message": f"Password reset for {staff['staff_name']}. They will set a new password on next login.",
+                "staff_name": staff['staff_name'],
+                "deleted": int(deleted) if deleted.isdigit() else 0
+            }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/v1/admin/sync-status")
+async def admin_sync_status(
+    token: str = Query(..., description="Session token"),
+    check_date: Optional[date] = Query(None, description="Date to check (defaults to today)")
+):
+    """Get sync accuracy snapshot. Requires can_manage_roles permission."""
+    if token not in sessions:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    session = sessions[token]
+    if datetime.now() > session['expires_at']:
+        del sessions[token]
+        raise HTTPException(status_code=401, detail="Session expired")
+    if not session['user'].get('permissions', {}).get('can_manage_roles'):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    if not check_date:
+        check_date = get_myt_date()
+
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT table_name, location, check_date, mssql_count, pg_count, diff, checked_at
+                FROM kpi.sync_accuracy_snapshot
+                WHERE check_date = $1
+                ORDER BY table_name, location
+            """, check_date)
+
+            results = []
+            for r in rows:
+                results.append({
+                    "table_name": r['table_name'],
+                    "location": r['location'],
+                    "check_date": r['check_date'].isoformat(),
+                    "mssql_count": r['mssql_count'],
+                    "pg_count": r['pg_count'],
+                    "diff": r['diff'],
+                    "checked_at": r['checked_at'].isoformat() if r['checked_at'] else None,
+                })
+
+            # Summary stats
+            total_mismatches = sum(1 for r in results if r['diff'] != 0)
+            total_missing = sum(abs(r['diff']) for r in results if r['diff'] != 0)
+
+            return {
+                "success": True,
+                "check_date": check_date.isoformat(),
+                "data": results,
+                "summary": {
+                    "total_checks": len(results),
+                    "mismatches": total_mismatches,
+                    "total_missing_records": total_missing,
+                }
+            }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/v1/admin/staff-export")
+async def admin_staff_export(
+    token: str = Query(..., description="Session token"),
+    format: str = Query("json", description="Export format: json or xlsx")
+):
+    """Export full staff list. Requires can_manage_roles permission."""
+    if token not in sessions:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    session = sessions[token]
+    if datetime.now() > session['expires_at']:
+        del sessions[token]
+        raise HTTPException(status_code=401, detail="Session expired")
+    if not session['user'].get('permissions', {}).get('can_manage_roles'):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT staff_id, staff_name, role, pos_user_group, is_supervisor,
+                       primary_outlet, primary_outlet_name,
+                       region, area_manager_id, area_manager_name,
+                       is_active, phone, email, synced_at
+                FROM kpi.staff_list_master
+                ORDER BY primary_outlet, staff_name
+            """)
+
+            staff_list = [
+                {
+                    "staff_id": r['staff_id'],
+                    "staff_name": r['staff_name'],
+                    "role": r['role'],
+                    "pos_user_group": r['pos_user_group'],
+                    "is_supervisor": r['is_supervisor'],
+                    "primary_outlet": r['primary_outlet'],
+                    "primary_outlet_name": r['primary_outlet_name'],
+                    "region": r['region'],
+                    "area_manager_id": r['area_manager_id'],
+                    "area_manager_name": r['area_manager_name'],
+                    "is_active": r['is_active'],
+                    "phone": r['phone'],
+                    "email": r['email'],
+                    "synced_at": r['synced_at'].isoformat() if r['synced_at'] else None,
+                }
+                for r in rows
+            ]
+
+            if format == "xlsx":
+                if not EXCEL_AVAILABLE:
+                    raise HTTPException(status_code=500, detail="openpyxl not installed on server")
+
+                wb = Workbook()
+                ws = wb.active
+                ws.title = "Staff List"
+
+                # Header row
+                headers = [
+                    "Staff ID", "Staff Name", "Role", "POS User Group", "Is Supervisor",
+                    "Primary Outlet", "Outlet Name", "Region", "Area Manager ID",
+                    "Area Manager Name", "Active", "Phone", "Email", "Synced At"
+                ]
+                ws.append(headers)
+
+                # Style header
+                from openpyxl.styles import Font, PatternFill
+                header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+                header_font = Font(color="FFFFFF", bold=True)
+                for cell in ws[1]:
+                    cell.fill = header_fill
+                    cell.font = header_font
+
+                # Data rows
+                for s in staff_list:
+                    ws.append([
+                        s['staff_id'], s['staff_name'], s['role'], s['pos_user_group'],
+                        s['is_supervisor'], s['primary_outlet'], s['primary_outlet_name'],
+                        s['region'], s['area_manager_id'], s['area_manager_name'],
+                        s['is_active'], s['phone'], s['email'], s['synced_at'],
+                    ])
+
+                # Auto-width columns
+                for col in ws.columns:
+                    max_len = max(len(str(cell.value or "")) for cell in col)
+                    ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 40)
+
+                buffer = io.BytesIO()
+                wb.save(buffer)
+                buffer.seek(0)
+
+                return StreamingResponse(
+                    buffer,
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": "attachment; filename=staff_list.xlsx"}
+                )
+
+            # Default: JSON
+            return {"success": True, "staff": staff_list, "total": len(staff_list)}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 if __name__ == "__main__":
