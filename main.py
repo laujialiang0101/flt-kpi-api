@@ -1710,6 +1710,8 @@ async def get_team_overview(
             # Step 1: Get historical data from MV (excluding today)
             if has_historical:
                 if outlet_list:
+                    # Fix: Join rankings on staff's assigned outlet, not where sale happened
+                    # This prevents duplicate rows when staff sell at multiple outlets
                     mv_staff = await conn.fetch("""
                         SELECT
                             k.staff_id,
@@ -1731,12 +1733,13 @@ async def get_team_overview(
                         LEFT JOIN analytics.mv_staff_rankings r
                             ON k.staff_id = r.staff_id
                             AND r.month = DATE_TRUNC('month', $1::date)
-                            AND r.outlet_id = k.outlet_id
+                            AND r.outlet_id = s."AcSalesmanGroupID"
                         WHERE k.sale_date BETWEEN $1 AND $2
                           AND k.outlet_id = ANY($3)
                         GROUP BY k.staff_id, s."AcSalesmanName", s."AcSalesmanGroupID", r.company_rank_sales
                     """, start_date, hist_end, outlet_list)
                 else:
+                    # Fix: Join rankings on staff's assigned outlet, not where sale happened
                     mv_staff = await conn.fetch("""
                         SELECT
                             k.staff_id,
@@ -1758,7 +1761,7 @@ async def get_team_overview(
                         LEFT JOIN analytics.mv_staff_rankings r
                             ON k.staff_id = r.staff_id
                             AND r.month = DATE_TRUNC('month', $1::date)
-                            AND r.outlet_id = k.outlet_id
+                            AND r.outlet_id = s."AcSalesmanGroupID"
                         WHERE k.sale_date BETWEEN $1 AND $2
                         GROUP BY k.staff_id, s."AcSalesmanName", s."AcSalesmanGroupID", r.company_rank_sales
                     """, start_date, hist_end)
@@ -2199,6 +2202,7 @@ async def export_team_performance(
         async with pool.acquire() as conn:
             if view_all:
                 if outlet_list:
+                    # Fix: Join rankings on staff's assigned outlet, not where sale happened
                     staff = await conn.fetch("""
                         SELECT
                             k.staff_id,
@@ -2221,13 +2225,14 @@ async def export_team_performance(
                         LEFT JOIN analytics.mv_staff_rankings r
                             ON k.staff_id = r.staff_id
                             AND r.month = DATE_TRUNC('month', $1::date)
-                            AND r.outlet_id = k.outlet_id
+                            AND r.outlet_id = s."AcSalesmanGroupID"
                         WHERE k.sale_date BETWEEN $1 AND $2
                           AND k.outlet_id = ANY($3)
                         GROUP BY k.staff_id, s."AcSalesmanName", s."AcSalesmanGroupID", l."AcLocationDesc", r.company_rank_sales
                         ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
                     """, start, end, outlet_list)
                 else:
+                    # Fix: Join rankings on staff's assigned outlet, not where sale happened
                     staff = await conn.fetch("""
                         SELECT
                             k.staff_id,
@@ -2250,7 +2255,7 @@ async def export_team_performance(
                         LEFT JOIN analytics.mv_staff_rankings r
                             ON k.staff_id = r.staff_id
                             AND r.month = DATE_TRUNC('month', $1::date)
-                            AND r.outlet_id = k.outlet_id
+                            AND r.outlet_id = s."AcSalesmanGroupID"
                         WHERE k.sale_date BETWEEN $1 AND $2
                         GROUP BY k.staff_id, s."AcSalesmanName", s."AcSalesmanGroupID", l."AcLocationDesc", r.company_rank_sales
                         ORDER BY COALESCE(SUM(k.total_sales), 0) DESC
